@@ -135,14 +135,16 @@ class Entry:
     content: str | dict | None      # 按 kind 解释（user/assistant: str；tool_call/tool_result: dict）
 ```
 
-**事件类型**（第 5 步 events.py 实现内核侧，此处定门面形状）：
+**事件类型**（第 5 步 events.py 实现内核侧，全集 8 类与 data 键名的唯一权威见 [events-bots.md](./events-bots.md)）：
 
 ```python
 @dataclass(frozen=True)
 class Event:
     task_id: str
-    type: str                       # text_delta / tool_call_started / tool_result / phase_changed / task_finished
-    data: dict                      # 按 type 解释；text_delta 含增量文本与工具名等中间态
+    session_id: str           # 通用归组键（Web/日志/测试按会话聚合）
+    type: str                 # task_started / text_delta / tool_call_started / tool_result /
+                              # phase_changed / task_finished / steering_received / compaction_started
+    data: dict                # 键名见 events-bots.md 全集表；text_delta 含 final 标记
 ```
 
 ## BotRuntime / Bot 接口
@@ -202,6 +204,7 @@ class RuntimeConfig:
     model: str = "openai/gpt-4o"                   # 全局默认（三层：任务>会话>全局）
     api_key_env: str = "OPENAI_API_KEY"            # 只存环境变量名，不存值
     max_iterations: int = 50
+    context_window: int = 128000                   # 模型窗口（compaction 阈值用；模型名不含此信息，显式配置）
     # 注入口（测试与高级用法；生产用默认装配）
     stream_fn: Callable | None = None              # 装配期注入 mock 模型（AGENTS.md 测试确定性）
     tools: dict[str, Tool] | None = None           # 装配期注入自定义工具集

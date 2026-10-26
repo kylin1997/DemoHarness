@@ -11,7 +11,11 @@
 | 4 | core/loop.py + providers/ | ReAct 循环（stream_fn 注入点、steering/follow-up 注入、finish_turn 决策）+ OpenAI 兼容最小接入 | mock 模型单测：多轮工具循环、预算耗尽、取消、steering 注入；**最小 SDK 闭环可跑**（mock） |
 | 5 | core/events.py + bots/ | 事件流（Web 消费的协议）+ bot spec（SOUL/AGENTS.md/工具白名单、bot_id 命名空间装配） | 单测：事件序列、bot 隔离（会话/工作区过滤） |
 | 6 | compaction/ | 两段式压缩（阈值触发、切点选择、事务外摘要+事务内提交） | 单测：mock 摘要的压缩重放、边界切点规则、压缩后上下文重建 |
-| 7 | scenarios/ + web/ | 首个复杂场景（真实模型，综合运用循环/工具/恢复/压缩）+ Web 薄壳（SSE 观察、互动、设置） | 场景可复现（真实模型证据）；Web 三界面可用 |
+| 7 | 多 Agent（任务分派，扩展） | 三个去向：自己执行 / 派给另一个 bot（对方 spec 开会话）/ 启动 subagent（内联参数临时会话）。一机制两来源，不进内核；策略扩展提供 delegate_subagent/assign_bot 等工具 | 单测：分派三去向、subagent 会话隔离与结果回传、子父溯源链接 |
+| 8 | 后台任务/异步执行（扩展） | 后台 subagent 不阻塞父会话，完成后 follow-up 回投；重启后存活（safe 工具可重放自动续跑、副作用工具物化中断）；Agent View 后台任务列表 | 单测：回投、重启存活重排、重放上限（3 次停车）、Agent View 查询 |
+| 9 | scenarios/ + web/ | 首个复杂场景（真实模型，综合运用循环/工具/恢复/压缩/多 bot/后台任务）+ Web 薄壳（SSE 观察、互动、设置） | 场景可复现（真实模型证据）；Web 三界面可用 |
+
+> 可观测（事件流 + Web 观察面）不单列一步——事件流内核在第 5 步，观察面在第 9 步，它横切各步而非新增模块。
 
 原则（AGENTS.md 准则）：
 
