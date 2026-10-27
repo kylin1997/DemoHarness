@@ -80,7 +80,10 @@ class _WriteFileTool:
         p = Path(params["path"])
         p.parent.mkdir(parents=True, exist_ok=True)
         content = params["content"]
-        p.write_text(content, encoding="utf-8")
+        # 原子写（temp + rename）：避免中断留下半写文件。
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(p)
         return ToolResult(content=f"已写入 {params['path']}（{len(content)} 字符）")
 
 

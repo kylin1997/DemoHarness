@@ -433,12 +433,12 @@ async def _replay_prefix(session_mgr: SessionManager, sid: str) -> list[EntryRow
 
 
 async def _drain_steering(runtime: LoopRuntime, task_id: str, sid: str) -> None:
-    """执行本会话 FIFO 里排队的 steering append。
+    """no-op：steering 语义已由「FIFO + 重放」间接承担，无需显式 drain。
 
-    第 4 步占位：steering 的完整语义（运行中追加 user entry → 下一轮上下文
-    自然携带）依赖门面层（第 0 步）把 steer 消息翻译成 AppendOp 并投入 FIFO；
-    FIFO 串行化保证它们会在本循环的 append 之间被按序消费。这里无需额外地
-    drain——steering append 一经提交即进入会话历史，重放自然携带。
+    steering（运行中追加的 user 指令）经 TaskHandle.steer() → session submit
+    落盘为 user entry；loop 每轮开头 `_replay_prefix` 从 storage 重放活跃链，
+    该 entry 自然进入下一轮模型上下文。这里没有单独的「drain」动作要做——
+    不存在「排队中的 steering 等待被消费」这一步。
     """
     return
 
