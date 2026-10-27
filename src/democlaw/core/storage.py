@@ -146,7 +146,11 @@ class Storage:
         _open_paths[self.path] = self
 
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # check_same_thread=False：Web 薄壳用一个后台 asyncio 循环跑任务，而
+        # Storage 在装配线程创建，会跨线程使用。安全由三层保证：(1) 进程内单实例
+        # 单连接（StorageAlreadyOpen）；(2) 所有写经 BEGIN IMMEDIATE 单写者；
+        # (3) sqlite3 模块自身的连接级互斥。教学规模足够。
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
 

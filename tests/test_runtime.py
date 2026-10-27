@@ -79,3 +79,66 @@ def test_sessions_with_interrupted(tmp_path):
     found = rt.sessions_with(StopReason.INTERRUPTED)
     assert any(s.id == sid for s in found)
     rt.close()
+
+
+def test_start_async_handle(tmp_path):
+    """start() 提交立即返回 TaskHandle；aresult() 等到终态；events() 推事件。"""
+    import asyncio
+
+    async def mock_stream(request, cancel):
+        return ModelResponse(ModelStop.OK, "完成", [])
+
+    bots_dir = _mk_bots_dir(tmp_path)
+    rt = BotRuntime.build(RuntimeConfig(db_path=str(tmp_path / "start.db"), stream_fn=mock_stream, bots_dir=bots_dir))
+
+    async def go():
+        bot = rt.bot("architect")
+        handle = bot.start("做任务")
+        assert handle.status().phase == "queued"
+        events = []
+        async for ev in handle.events():
+            events.append(ev.type)
+            if ev.type == "task_finished":
+                break
+        result = await handle.aresult()
+        return result, events
+
+    result, events = asyncio.run(go())
+    assert result.stop_reason == StopReason.COMPLETED
+    assert result.content == "完成"
+    assert "task_started" in events and "task_finished" in events
+    # session_tasks 能看到这条任务
+    statuses = rt.session_tasks(result.session_id)
+    assert len(statuses) == 1
+    rt.close()
+
+
+def test_start_steer_and_cancel(tmp_path):
+    """steer 注入 + cancel 取消。"""
+    import asyncio
+
+    seen = []
+
+    async def mock_stream(request, cancel):
+        seen.append(request)
+        if cancel.is_set():
+            return ModelResponse(ModelStop.ABORTED, "", [])
+        # 贴近真实：工具调用已落盘、结果未落盘之前持续返回工具调用
+        return ModelResponse(ModelStop.OK, "", [{"call_id": "c1", "name": "read_file", "params": {"path": "x"}}])
+
+    bots_dir = _mk_bots_dir(tmp_path)
+    rt = BotRuntime.build(RuntimeConfig(db_path=str(tmp_path / "cancel.db"), stream_fn=mock_stream, bots_dir=bots_dir))
+
+    async def go():
+        bot = rt.bot("architect")
+        handle = bot.start("做任务")
+        # 运行中 steer（会话已同步建好，句柄从一开始就持真实 session_id）
+        await handle.steer("顺便查一下 Y")
+        # 取消
+        handle.cancel()
+        result = await handle.aresult()
+        return result
+
+    result = asyncio.run(go())
+    assert result.stop_reason == StopReason.CANCELLED
+    rt.close()
