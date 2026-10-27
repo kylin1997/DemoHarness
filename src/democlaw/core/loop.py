@@ -114,6 +114,8 @@ class LoopRuntime:
     context_window: int
     finish_turn: FinishTurn
     cancel: asyncio.Event | None = None
+    # 工具执行前的钩子（before_tool_call）：扩展策略（如 plan_mode 的只读约束）经此注入。
+    before_hooks: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -309,7 +311,9 @@ async def run_task_loop(
                         Event(task_id=task_id, session_id=sid, type="tool_call_started",
                               data={"call_id": c.call_id, "name": c.name, "params": c.params})
                     )
-                results = await execute_tool_calls(calls, runtime.registry, cancel=cancel)
+                results = await execute_tool_calls(
+                    calls, runtime.registry, cancel=cancel, before_hooks=runtime.before_hooks
+                )
                 for tc, tr in zip(calls, results):
                     await _append(
                         runtime,

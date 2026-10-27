@@ -177,6 +177,16 @@ class SessionManager:
 
     # ── 提交流程 ─────────────────────────────────────────────────
 
+    def new_session_sync(self, op: NewOp) -> SessionInfo:
+        """同步新建会话（new 是直接事务、不走 FIFO，无事件循环依赖）。
+
+        供门面在 async 语境下启动任务时同步解析会话（start() 需要句柄一开始
+        就持真实 session_id）；常规路径仍走 submit(NewOp)。
+        """
+        if op.session_id in self._tombstoned:
+            raise SessionNotFound(op.session_id)
+        return self._new(op)
+
     async def submit(self, session_id: str, op: SessionOp) -> Any:
         if session_id in self._tombstoned:
             raise SessionNotFound(session_id)
