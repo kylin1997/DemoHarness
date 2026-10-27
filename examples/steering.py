@@ -1,49 +1,34 @@
-"""steering 与 follow-up 示例（examples/steering.py）。
+"""follow-up 与 steering 示例（examples/steering.py）。
 
-演示两类「运行中/结束后追加输入」：
-- steering（运行中追加指令）：任务在工具调用之间插入一条指令，不打断进行中的工作
-- follow-up（结束后排队的新输入）：任务结束后用同一会话再跑一轮，天然接续
+演示：连续对话（follow-up）——同一个会话再 run 一次，上下文自然接续。
+真实模型。先 cp examples/.env.example examples/.env。
 
-用 mock 模型保证确定性。运行：`uv run python examples/steering.py`
+运行：`uv run python examples/steering.py`
 """
 
-from __future__ import annotations
+import pathlib
+import sys
 
-from pathlib import Path
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from democlaw.core.loop import ModelResponse, ModelStop
-from democlaw.runtime import BotRuntime, RuntimeConfig
-
-
-def make_mock_stream_fn():
-    """mock 模型：每次被问到就回一句短答，不带工具。"""
-    state = {"n": 0}
-
-    async def stream_fn(request, cancel):
-        state["n"] += 1
-        return ModelResponse(ModelStop.OK, f"这是第 {state['n']} 轮回答", [])
-
-    return stream_fn
+from _common import demo_runtime
 
 
 def main():
-    runtime = BotRuntime.build(
-        RuntimeConfig(db_path=str(Path.home() / ".democlaw" / "steering.db"), stream_fn=make_mock_stream_fn())
-    )
+    runtime = demo_runtime("steering")
     arch = runtime.bot("architect")
 
-    # 第一次 run
-    r1 = arch.run("第一步")
-    print(f"[run 1] {r1.stop_reason.value}: {r1.content}")
+    r1 = arch.run("帮我想一个变量名，表示「用户是否已登录」")
+    print(f"[第 1 轮] {r1.content}\n")
 
-    # follow-up：同一会话再跑一轮（会话延续），历史自然接续
-    r2 = arch.run("接着上一步继续", session_id=r1.session_id)
-    print(f"[run 2] {r2.stop_reason.value}: {r2.content}")
+    # follow-up：同一会话再跑一轮，上一轮内容在上下文里
+    r2 = arch.run("好，就按你说的来，顺便给一个 Python 用法示例", session_id=r1.session_id)
+    print(f"[第 2 轮] {r2.content}\n")
 
-    # 看这段连续对话的历史：两个 user 输入都在这条会话上
-    print(f"\n会话 {r1.session_id} 的历史：")
+    # 历史里能看到两轮输入都在这条会话上
+    print("会话历史：")
     for e in runtime.history(r1.session_id):
-        print(f"  [{e.kind}] {e.content[:50]}")
+        print(f"  [{e.kind}] {e.content[:60]}")
 
     runtime.close()
 

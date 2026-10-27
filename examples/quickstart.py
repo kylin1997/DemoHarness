@@ -1,38 +1,25 @@
 """DemoClaw 最小使用示例（examples/quickstart.py）。
 
-用 mock 模型跑通「build → run → 读结果 → 会话树」的最短路径。不需要 API key。
+真实模型跑通「build → run → 读结果 → 会话树」的最短路径。
+先 cp examples/.env.example examples/.env 并填 OPENAI_API_KEY。
 
 运行：`uv run python examples/quickstart.py`
 """
 
+import pathlib
+import sys
 
-from pathlib import Path
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from democlaw.core.loop import ModelResponse, ModelStop
-from democlaw.runtime import BotRuntime, RuntimeConfig
-
-
-def make_mock_stream_fn():
-    """一个确定性的 mock 模型：先调一次 read_file，再回最终答案。"""
-    state = {"n": 0}
-
-    async def stream_fn(request, cancel):
-        state["n"] += 1
-        if state["n"] == 1:
-            return ModelResponse(ModelStop.OK, "我先读一下文件", [{"call_id": "c1", "name": "read_file", "params": {"path": "README.md"}}])
-        return ModelResponse(ModelStop.OK, "已读完：这是一个教学用 agent harness。", [])
-
-    return stream_fn
+from _common import demo_runtime
 
 
 def main():
-    runtime = BotRuntime.build(
-        RuntimeConfig(db_path=str(Path.home() / ".democlaw" / "quickstart.db"), stream_fn=make_mock_stream_fn())
-    )
-    architect = runtime.bot("architect")
+    runtime = demo_runtime("quickstart")
+    arch = runtime.bot("architect")
 
-    # 1. 跑一个任务（同步阻塞）
-    result = architect.run("读一下 README")
+    # 1. 跑一个任务
+    result = arch.run("读一下 README.md，告诉我它是做什么的")
     print(f"结果({result.stop_reason.value}): {result.content}")
 
     # 2. 看会话树
@@ -40,11 +27,9 @@ def main():
         print(f"会话 {s.id} (bot={s.bot_id}) 活跃叶={s.active_entry_id}")
 
     # 3. 读历史
-    sid = result.session_id
-    for e in runtime.history(sid):
-        print(f"  [{e.kind}] {e.content[:40]}")
+    for e in runtime.history(result.session_id):
+        print(f"  [{e.kind}] {e.content[:60]}")
 
-    # 4. 用完即走
     runtime.close()
 
 
