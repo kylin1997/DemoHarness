@@ -6,6 +6,8 @@
 """
 
 
+from pathlib import Path
+
 from democlaw.core.loop import ModelResponse, ModelStop
 from democlaw.runtime import BotRuntime, RuntimeConfig
 
@@ -25,7 +27,7 @@ def make_mock_stream_fn():
 
 def main():
     runtime = BotRuntime.build(
-        RuntimeConfig(db_path="/tmp/democlaw-example.db", stream_fn=make_mock_stream_fn())
+        RuntimeConfig(db_path=str(Path.home() / ".democlaw" / "quickstart.db"), stream_fn=make_mock_stream_fn())
     )
     architect = runtime.bot("architect")
 

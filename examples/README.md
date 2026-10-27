@@ -13,16 +13,11 @@
 
 ## 目录状态
 
-**占位中**：SDK 门面（第 0 步 `BotRuntime`）尚未实现，当前 `src/democlaw/` 只有
-内核层（storage/session/task/tools/loop/events），对外的一行式门面 API
-（`BotRuntime.build()` / `bot.run()` / `task.steer()` 等）还未落地。
-
-示例脚本将在此就位后填充，预计覆盖：
+SDK 门面已落地，示例就绪。每个示例用 mock 模型保证确定性、不依赖网络与真实
+API key，可直接 `uv run python examples/xxx.py` 复现：
 
 1. `quickstart.py` — 一行 build、一行 run、读结果（mock 模型）
-2. `steering.py` — 运行中 steer + 结束后续聊 follow-up
-3. `recovery.py` — 中断恢复（发现 interrupted 会话 → 显式续跑）
-4. `session_tree.py` — fork/reset/delete 会话树动词
-
-每个示例用 mock 模型保证确定性、不依赖网络与真实 API key，可直接 `uv run
-python examples/xxx.py` 复现。
+2. `steering.py` — follow-up（同一会话再 run，历史自然接续）；运行中 steer 见
+   `Bot.start()` + `TaskHandle.steer()`（async 面）
+3. `recovery.py` — 中断恢复（构造未终态 → 恢复扫描物化 → sessions_with(INTERRUPTED) 发现）
+4. `session_tree.py` — fork/reset/delete 会话树动词（拷贝前缀、重置、级联删）

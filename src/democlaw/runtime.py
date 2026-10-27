@@ -162,9 +162,13 @@ class BotSpec:
 
 @dataclass
 class RuntimeConfig:
+    # 运行时数据统一放用户家目录 ~/.democlaw/（不建 data/ 目录进项目）：
+    #   - db（SQLite）→ ~/.democlaw/democlaw.db
+    #   - workspace（bot 工作区）→ ~/.democlaw/workspace/
+    # 这两类都是运行产物，不进 git。教学样例（bots/）在项目内、进 git。
     db_path: str | Path = Path.home() / ".democlaw" / "democlaw.db"
     bots_dir: str | Path = Path("bots")
-    workspace_root: str | Path = Path("workspace")
+    workspace_root: str | Path = Path.home() / ".democlaw" / "workspace"
     model: str = "openai/gpt-4o"
     api_key_env: str = "OPENAI_API_KEY"
     max_iterations: int = 50
