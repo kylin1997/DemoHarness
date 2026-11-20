@@ -16,8 +16,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from _common import demo_runtime
 
-from democlaw.core.session import AppendOp, NewOp
-from democlaw.core.task import StopReason, scan_and_recover
+from demoharness.core.session import AppendOp, NewOp
+from demoharness.core.task import StopReason, scan_and_recover
 
 
 def main():

@@ -13,7 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from _common import demo_runtime
 
-from democlaw.core.task import StopReason
+from demoharness.core.task import StopReason
 
 
 def main():

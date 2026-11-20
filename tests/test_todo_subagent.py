@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from democlaw.core.tools import ToolRegistry
-from democlaw.tools.todo import TodoTool, register_todo_tool
+from demoharness.core.tools import ToolRegistry
+from demoharness.tools.todo import TodoTool, register_todo_tool
 
 
 def run(coro):
@@ -57,7 +57,7 @@ def test_todo_registered():
 
 
 def test_subagent_tool_registers_and_calls_back():
-    from democlaw.tools.subagent import register_delegate_subagent
+    from demoharness.tools.subagent import register_delegate_subagent
 
     calls = []
 
@@ -77,7 +77,7 @@ def test_subagent_tool_registers_and_calls_back():
 
 
 def test_subagent_tool_error():
-    from democlaw.tools.subagent import register_delegate_subagent
+    from demoharness.tools.subagent import register_delegate_subagent
 
     async def failing(prompt, tools, budget):
         raise RuntimeError("子任务崩了")

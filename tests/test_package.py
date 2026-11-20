@@ -1,4 +1,4 @@
 def test_import():
-    import democlaw
+    import demoharness
 
-    assert democlaw.__version__ == "0.1.0"
+    assert demoharness.__version__ == "0.1.0"

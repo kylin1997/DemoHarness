@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from democlaw.core.events import Event, EventBus
+from demoharness.core.events import Event, EventBus
 
 
 def run(coro):

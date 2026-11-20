@@ -1,5 +1,5 @@
 [project]
-name = "democlaw"
+name = "demoharness"
 version = "0.1.0"
 description = "A minimal teaching demo for long-running agent tasks."
 readme = "README.md"
@@ -18,5 +18,8 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/democlaw"]
+packages = ["src/demoharness"]

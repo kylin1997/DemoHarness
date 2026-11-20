@@ -1,7 +1,7 @@
 """plan-mode 扩展策略（strategies/plan_mode.py）。
 
 对齐 pi 的 plan-mode 扩展（references/pi/.../plan-mode/），但只落**能力本体**，
-把交互面做成接口留给 UI 层（CLI/Web 各自接交互，不走 TUI）。
+把交互面做成接口留给 SDK 调用方（不走 TUI）。
 
 能力本体（无 UI 的纯逻辑）：
 - 工具约束：只读命令白名单（is_safe_command）——危险命令在 plan 模式下被 before_hook 拦截
@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from democlaw.core.tools import BeforeVerdict
+from demoharness.core.tools import BeforeVerdict
 
 # ── 只读命令白名单（照 pi utils.ts 直译） ──
 
@@ -126,7 +126,7 @@ def mark_completed_steps(text: str, items: list[TodoItem]) -> int:
 
 @dataclass
 class PlanMode:
-    """plan-mode 扩展策略。能力本体 + 接口，交互面由 UI 层（CLI/Web）调这些方法。
+    """plan-mode 扩展策略。能力本体 + 接口，交互面由 SDK 调用方调这些方法。
 
     状态机：disabled → plan（只读 + 产计划）→ execute（执行计划）→ done/reset。
     - enter()  进入 plan——启用只读约束（工具白名单切换 + run_command 只读）

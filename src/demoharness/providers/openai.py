@@ -13,7 +13,7 @@ import json
 
 import httpx
 
-from democlaw.core.loop import ModelRequest, ModelResponse, ModelStop
+from demoharness.core.loop import ModelRequest, ModelResponse, ModelStop
 
 
 def make_openai_stream_fn(

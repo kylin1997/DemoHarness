@@ -5,7 +5,7 @@
 
 ## 目标
 
-实现事件流（Web 观察面的活体通道）与 bot 装配（spec → 运行实体）。
+实现事件流（SDK 调用方的活体通道）与 bot 装配（spec → 运行实体）。
 
 ## 事件流（core/events.py）
 
@@ -13,7 +13,7 @@
 @dataclass(frozen=True)
 class Event:
     task_id: str
-    session_id: str          # 通用归组键（Web/日志/测试按会话聚合都需要，非 UI 专用）
+    session_id: str          # 通用归组键（SDK 调用方/日志/测试按会话聚合都需要）
     type: str                # 见全集表
     data: dict
 
@@ -42,7 +42,7 @@ class EventBus:
 | steering_received | {text} | steering drain 时（task/session 归属在 Event 字段） |
 | compaction_started | {summary_preview} | 压缩段 2 提交后（compaction 可观察） |
 
-**慢消费者语义（诚实声明）**：SSE 消费者（浏览器后台节流）丢帧后 UI 停在旧状态，**直到下一个事件到达或前端主动拉 task/session_tasks 刷新**；phase 类事件建议前端用"最新帧覆盖"渲染（收到即覆盖显示，不追加），丢中间帧无感知。不承诺过程帧完整。
+**慢消费者语义（诚实声明）**：订阅者丢帧后会停留在旧状态，**直到下一个事件到达或主动查询 task/session_tasks 刷新**；phase 类事件建议消费者用“最新帧覆盖”处理（收到即覆盖显示，不追加），丢中间帧无感知。不承诺过程帧完整。
 
 ## bot 装配（BotRuntime 层）
 
@@ -70,9 +70,9 @@ bot 首次使用时（run/start）：白名单语义校验（工具名在最终�
 
 **workspace 目录生命周期**：build 时一次性创建全部已加载 bot 的 `workspace/<bot>/`（教学规模 bot 少，无竞态、无懒建复杂度）；delete 会话**不碰** workspace 文件（文件是 bot 资产非会话资产）；bot 目录的增删是文件系统操作，不在 SDK 内。
 
-**会话层模型（三层中间层）的存储**：**sessions 表补 `model TEXT` 列**（第 1 步 schema 的遗漏，本稿显式移交——storage-session.md 需加一列与 set 途径；fork 不继承 model、reset 保留）。Web 切换模型 = 写会话行 model 字段；spec.model 是 bot 级默认，会话行 model 是会话级覆盖，解析链任务 > 会话行 > spec > 全局（四层实际三级：spec 与会话行同级取后者优先）。*留用户确认：是否接受第 1 步 schema 补列。*
+**会话层模型（三层中间层）的存储**：**sessions 表补 `model TEXT` 列**（第 1 步 schema 的遗漏，本稿显式移交——storage-session.md 需加一列与 set 途径；fork 不继承 model、reset 保留）。SDK 会话级模型覆盖 = 写会话行 model 字段；spec.model 是 bot 级默认，会话行 model 是会话级覆盖，解析链任务 > 会话行 > spec > 全局（四层实际三级：spec 与会话行同级取后者优先）。
 
-**title 归属**：第一阶段 title 保持 None——Web 观察面会话列表用 `bot 名 + 短序号` 显示；自动摘要标题（首条输入截断）留给后续，不引入"运行中改 title"的动词。
+**title 归属**：第一阶段 title 保持 None——调用方需要显示名时用 `bot 名 + 短序号`；自动摘要标题（首条输入截断）留给后续，不引入"运行中改 title"的动词。
 
 ## 与其他模块的接口
 
@@ -82,8 +82,8 @@ bot 首次使用时（run/start）：白名单语义校验（工具名在最终�
 | tools.py | tool_call_started / tool_result |
 | providers | text_delta（流式时增量+final 标记） |
 | compaction | compaction_started |
-| 门面 | TaskHandle.events() = subscribe(task_id=...)；Web SSE = subscribe(session_id=...) |
-| web（第 7 步） | settings 界面写 sessions.model（经新 API） |
+| 门面 | TaskHandle.events() = subscribe(task_id=...)；需要会话级活体事件时可用 subscribe(session_id=...) |
+| SDK | set_session_model() 写 sessions.model |
 
 ## 关键设计决策
 
@@ -110,7 +110,7 @@ bot 首次使用时（run/start）：白名单语义校验（工具名在最终�
 
 **分歧 5：sessions 表补 model 列（会话层模型存储）**
 - 本稿裁决：补列（第 1 步 schema 遗漏）。四层解析（任务>会话行>spec>全局）实质是三层取最近覆盖。
-- 备选：不补列，Web 切模型走"写一个 sidecar json"——脏。
+- 备选：不补列，会话级模型覆盖走"写一个 sidecar json"——脏。
 - **默认执行：补列**（第 1 步 storage-session.md 同步修订）。
 
 ## 评审要点（给用户）

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
-from democlaw.core.tools import ExecMode, ReplayPolicy, ToolResult, ToolSpec
+from demoharness.core.tools import ExecMode, ReplayPolicy, ToolResult, ToolSpec
 
 
 class TodoTool:

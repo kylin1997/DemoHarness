@@ -1,4 +1,4 @@
-"""DemoClaw 内核 · Task 状态机（core/task.py）。
+"""DemoHarness 内核 · Task 状态机（core/task.py）。
 
 纯函数库——phase 推导、stop_reason 落点、恢复物化/扫描。**while 循环
 只在 loop.py**（第 4 步），本模块不含循环体；三相 ↔ loop 步骤 ↔ append

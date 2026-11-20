@@ -22,3 +22,6 @@ __pycache__/
 # 运行时数据（不提交）
 workspace/
 examples/_data/
+
+# WorkBuddy 本地记忆（不提交）
+.workbuddy/

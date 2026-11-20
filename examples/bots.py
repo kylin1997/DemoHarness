@@ -16,7 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from _common import demo_runtime
 
-from democlaw.core.session import NewOp
+from demoharness.core.session import NewOp
 
 
 def main():

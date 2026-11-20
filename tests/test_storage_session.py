@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from democlaw.core.session import (
+from demoharness.core.session import (
     AppendOp,
     CompactOp,
     DeleteOp,
@@ -23,7 +23,7 @@ from democlaw.core.session import (
     SessionManager,
     SessionNotFound,
 )
-from democlaw.core.storage import Storage, StorageAlreadyOpen
+from demoharness.core.storage import Storage, StorageAlreadyOpen
 
 
 @pytest.fixture

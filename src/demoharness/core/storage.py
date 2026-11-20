@@ -1,4 +1,4 @@
-"""DemoClaw 内核 · 存储层（core/storage.py）。
+"""DemoHarness 内核 · 存储层（core/storage.py）。
 
 唯一碰 SQL 的地方。分层原则：storage.py 不懂业务语义（不知道什么是
 reset），session.py 不写 SQL——本层只提供 schema、读写原语、事务，
@@ -146,8 +146,8 @@ class Storage:
         _open_paths[self.path] = self
 
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=False：Web 薄壳用一个后台 asyncio 循环跑任务，而
-        # Storage 在装配线程创建，会跨线程使用。安全由三层保证：(1) 进程内单实例
+        # check_same_thread=False：SDK 的后台任务可能在事件循环线程使用 Storage，
+        # 而 Storage 在装配线程创建，会跨线程使用。安全由三层保证：(1) 进程内单实例
         # 单连接（StorageAlreadyOpen）；(2) 所有写经 BEGIN IMMEDIATE 单写者；
         # (3) sqlite3 模块自身的连接级互斥。教学规模足够。
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -251,6 +251,17 @@ class Storage:
         conn.execute(
             "UPDATE sessions SET active_leaf = ? WHERE id = ?", (leaf_id, sid)
         )
+
+    def update_session_model(
+        self, conn: sqlite3.Connection, sid: str, model: str | None
+    ) -> None:
+        """会话层模型覆盖的唯一 SQL 写入通道。
+
+        config 三层链（任务 > 会话 > 全局）的「会话」层由此落库；调用方是
+        session.py 的 SetModelOp（经会话 FIFO），门面不再直接发 SQL。
+        只改 sessions 的可变配置列，不触碰 entry（架构不变量 2：树只增不改）。
+        """
+        conn.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, sid))
 
     def delete_session_tree(self, conn: sqlite3.Connection, sids: list[str]) -> None:
         """一个事务内删除多个会话及其全部 entry（delete 级联用）。"""

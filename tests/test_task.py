@@ -11,9 +11,9 @@ import json
 
 import pytest
 
-from democlaw.core.session import AppendOp, SessionManager
-from democlaw.core.storage import EntryRow, Storage
-from democlaw.core.task import (
+from demoharness.core.session import AppendOp, SessionManager
+from demoharness.core.storage import EntryRow, Storage
+from demoharness.core.task import (
     NextStep,
     StopReason,
     decide,
@@ -59,7 +59,7 @@ def _mk(kind: str, content: str, parent: str | None = None, sid: str = "s", i: i
 
 
 async def _new_session(mgr, bot="b1"):
-    from democlaw.core.session import NewOp
+    from demoharness.core.session import NewOp
 
     return await mgr.submit("", NewOp("", bot_id=bot))
 

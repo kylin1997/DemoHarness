@@ -1,6 +1,6 @@
-# DemoClaw 使用示例（examples/）
+# DemoHarness 使用示例（examples/）
 
-本目录存放**如何使用 DemoClaw SDK** 的最小可运行示例——面向刚上手的开发者，
+本目录存放**如何使用 DemoHarness SDK** 的最小可运行示例——面向刚上手的开发者，
 每个示例演示一个能力，真实模型驱动（证明「功能不减配」）。
 
 ## 准备

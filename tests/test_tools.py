@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from democlaw.core.tools import (
+from demoharness.core.tools import (
     BeforeVerdict,
     ExecMode,
     ReplayPolicy,

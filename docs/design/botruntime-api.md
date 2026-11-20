@@ -6,12 +6,12 @@
 
 ## 目标
 
-定义 DemoClaw SDK 的门面：外部（Web、测试、教学示例、未来的 cron）如何使用 DemoClaw。本稿只定**公开接口的形状**——函数签名、数据类型、调用约定；不做实现。
+定义 DemoHarness SDK 的门面：外部（测试、教学示例、asyncio 应用、未来的 cron）如何使用 DemoHarness。本稿只定**公开接口的形状**——函数签名、数据类型、调用约定；不做实现。
 
 ## 使用图景
 
 ```python
-from democlaw import BotRuntime, BotSpec, RuntimeConfig, StopReason
+from demoharness import BotRuntime, BotSpec, RuntimeConfig, StopReason
 
 # 1. 装配：一次 build，得到可用的运行时
 runtime = BotRuntime.build(RuntimeConfig())    # 缺 API key 时 build 即报错并给出操作指引
@@ -24,7 +24,7 @@ result = architect.run("重构 src/utils.py 并验证测试通过")
 
 # 4. 或异步运行 + steering + 事件观察
 task = architect.start("调研三个库的优劣")     # 返回 TaskHandle，立即返回
-async for event in task.events():             # 活体事件流（Web 观察面的数据源）
+async for event in task.events():             # 活体事件流（SDK 调用方的数据源）
     ...                                        # ToolCallStarted / ToolResult / TextDelta / ...
 task.steer("重点看异步支持")                    # 运行中→注入当前任务；已结束→作为该会话的下一次输入自动执行
 result = task.result()                         # 同步阻塞至终态（含 cancelled）
@@ -60,7 +60,7 @@ runtime.close()
 **门面只有两个形态，规则简单**：
 
 - **同步语境**（教学示例、脚本）：用 `run()`（阻塞至终态返回 TaskResult）、`start()` + `task.result()`（阻塞等待）。内部由 BotRuntime 拥有一个事件循环线程，同步调用经它调度。
-- **async 语境**（Web 后端、asyncio 应用）：用 `await bot.arun()`、`start()` + `await task.aresult()`、`async for event in task.events()`。若检测到调用线程已有运行中的事件循环，同步 `run()` 抛 `RuntimeError` 并提示改用 async 形态——**同一语境只用一种形态**，不做"既阻塞又可 await"的双语境方法（语言层面不可行）。
+- **async 语境**（asyncio 应用、后台任务）：用 `await bot.arun()`、`start()` + `await task.aresult()`、`async for event in task.events()`。若检测到调用线程已有运行中的事件循环，同步 `run()` 抛 `RuntimeError` 并提示改用 async 形态——**同一语境只用一种形态**，不做"既阻塞又可 await"的双语境方法（语言层面不可行）。
 
 ## 公开类型
 
@@ -124,7 +124,7 @@ class SessionInfo:
     title: str | None
     bot_id: str
     active_entry_id: str            # 当前活跃叶（合法 reset/fork 参数的参照）
-    running_task_id: str | None     # 忙碌标记（Web 渲染"正在跑"用）
+    running_task_id: str | None     # 忙碌标记（调用方渲染“正在跑”用）
     created_at: float               # epoch 秒，仅排序用（权威顺序靠 entry id 单调）
 
 @dataclass(frozen=True)
@@ -141,7 +141,7 @@ class Entry:
 @dataclass(frozen=True)
 class Event:
     task_id: str
-    session_id: str           # 通用归组键（Web/日志/测试按会话聚合）
+    session_id: str           # 通用归组键（SDK 调用方/日志/测试按会话聚合）
     type: str                 # task_started / text_delta / tool_call_started / tool_result /
                               # phase_changed / task_finished / steering_received / compaction_started
     data: dict                # 键名见 events-bots.md 全集表；text_delta 含 final 标记
@@ -198,7 +198,7 @@ class Bot:
 ```python
 @dataclass
 class RuntimeConfig:
-    db_path: str | Path = Path.home() / ".democlaw" / "democlaw.db"
+    db_path: str | Path = Path.home() / ".demoharness" / "demoharness.db"
     bots_dir: str | Path = Path("bots")            # 相对 cwd 解析为绝对路径
     workspace_root: str | Path = Path("workspace") # 同上
     model: str = "openai/gpt-4o"                   # 全局默认（三层：任务>会话>全局）
@@ -210,7 +210,7 @@ class RuntimeConfig:
     tools: dict[str, Tool] | None = None           # 装配期注入自定义工具集
 ```
 
-会话层模型（Web 切换用，存储于会话属性）与任务层模型（`run(model=...)`）在各自入口覆盖。
+会话层模型（SDK 会话级覆盖用，存储于会话属性）与任务层模型（`run(model=...)`）在各自入口覆盖。
 
 ## 关键设计决策
 
@@ -218,7 +218,7 @@ class RuntimeConfig:
 2. **run 不传 session 自动新建**——教学最短路径一行可用；会话延续显式传 `session_id`。
 3. **Bot 是无状态视图**：不持运行态，每次调用落 storage；同名多次取等价。
 4. **steer 不要求调用方判断状态（用户修订）**：运行中 → 注入当前任务；已结束/排队尾 → 追加为该会话的下一次输入自动执行。"继续讨论"永远可行。这覆盖了 steering（运行中转向）与 follow-up（结束后续聊）两个内核概念，门面统一为一个入口。
-5. **事件流在门面定形状、第 5 步实现内核**：`task.events()` 是 Web 观察面的唯一活体通道（text_delta 含增量文本与工具中间态）；历史/重连永远查存储（架构不变量 6）。
+5. **事件流在门面定形状、第 5 步实现内核**：`task.events()` 是 SDK 调用方的唯一活体通道（text_delta 含增量文本与工具中间态）；历史/重连永远查存储（架构不变量 6）。
 6. **`sessions_with(StopReason.INTERRUPTED)` 是恢复的发现入口**：重启后枚举中断会话，续跑 = 调用方显式重新提交（架构恢复语义）。
 7. **delete 补齐**：六动词中 append/compact 是内部动词（经 FIFO/压缩扩展），new/reset/fork/delete 是门面动词——闭表暴露完整。
 8. **密钥只经环境变量**，build 时校验并给可操作报错。
@@ -248,6 +248,6 @@ class RuntimeConfig:
 ## 评审要点（给你的提示）
 
 1. `run/arun` 双形态 + 同步禁入 async 语境的契约是否可接受（还是干脆只做 async 形态？）
-2. 事件类型 `Event(type, data)` 的形状够不够 Web 用（还是应该强类型化每个事件？）
+2. 事件类型 `Event(type, data)` 的形状够不够 SDK 消费者用（还是应该强类型化每个事件？）
 3. `sessions_with(StopReason)` 的恢复发现入口形状
 4. 命名直白度：start/arun/steer/fork_session

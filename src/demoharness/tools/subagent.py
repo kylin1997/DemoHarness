@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from democlaw.core.tools import ExecMode, ReplayPolicy, Tool, ToolResult, ToolSpec
+from demoharness.core.tools import ExecMode, ReplayPolicy, Tool, ToolResult, ToolSpec
 
 
 @dataclass(frozen=True)

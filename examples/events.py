@@ -1,7 +1,7 @@
 """事件流示例（examples/events.py）。
 
 演示 task.events()：异步运行任务，实时订阅 task_started / tool_call_started /
-tool_result / task_finished 等事件（Web 观察面的数据源）。真实模型。先 cp examples/.env.example examples/.env。
+tool_result / task_finished 等事件（SDK 调用方的数据源）。真实模型。先 cp examples/.env.example examples/.env。
 
 运行：`uv run python examples/events.py`
 """

@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from _common import demo_runtime
 
-from democlaw.strategies.plan_mode import PlanMode
+from demoharness.strategies.plan_mode import PlanMode
 
 
 def main():

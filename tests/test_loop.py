@@ -11,18 +11,18 @@ import json
 
 import pytest
 
-from democlaw.core.events import EventBus
-from democlaw.core.loop import (
+from demoharness.core.events import EventBus
+from demoharness.core.loop import (
     LoopRuntime,
     ModelResponse,
     ModelStop,
     project_context,
     run_task_loop,
 )
-from democlaw.core.session import AppendOp, NewOp, SessionManager
-from democlaw.core.storage import EntryRow, Storage
-from democlaw.core.task import StopReason
-from democlaw.core.tools import (
+from demoharness.core.session import AppendOp, NewOp, SessionManager
+from demoharness.core.storage import EntryRow, Storage
+from demoharness.core.task import StopReason
+from demoharness.core.tools import (
     ExecMode,
     ReplayPolicy,
     ToolRegistry,

@@ -14,7 +14,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from democlaw.core.tools import (
+from demoharness.core.tools import (
     ExecMode,
     ReplayPolicy,
     Tool,

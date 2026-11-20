@@ -1,4 +1,4 @@
-"""DemoClaw 最小使用示例（examples/quickstart.py）。
+"""DemoHarness 最小使用示例（examples/quickstart.py）。
 
 真实模型跑通「build → run → 读结果 → 会话树」的最短路径。
 先 cp examples/.env.example examples/.env 并填 OPENAI_API_KEY。

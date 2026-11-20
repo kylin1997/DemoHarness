@@ -1,4 +1,4 @@
-"""DemoClaw 内核 · 工具调用协议（core/tools.py）。
+"""DemoHarness 内核 · 工具调用协议（core/tools.py）。
 
 内核只定协议，不实现任何具体工具——具体工具在 tools/ 扩展目录（第 3 步
 首批教学工具 read_file/write_file/run_command）。
@@ -15,6 +15,12 @@ docs/design/tools.md）：
 三段式执行管线：prepare（查注册表 + 参数校验 + before 钩子）→ execute
 （并发策略：任一 SEQUENTIAL 整批串行，全 PARALLEL 才 gather）→ finalize
 （after 钩子可替换结果）。
+
+参数校验（T01.4 冻结）：手写 JSON Schema 最小子集，标量 + required +
+enum/min/max + `{"type":"array","items":{"type":<scalar>}}` 的元素校验。
+复合判定只针对**实际传入的参数值**，不再遍历 schema 全部属性——否则一个
+声明了复合参数但本次没传的工具也会被整体拒绝（delegate_subagent 的
+tools 数组即此情形）。不引入 jsonschema，保持 httpx 唯一依赖。
 """
 
 from __future__ import annotations
@@ -48,6 +54,15 @@ class ToolSpec:
     execution: ExecMode = ExecMode.PARALLEL
 
 
+def is_replay_safe(spec: ToolSpec) -> bool:
+    """恢复/后台续跑的统一判定接口（L2-4 的 ReplayPolicy.SAFE 消费点）。
+
+    本轮冻结接口形状：仅显式声明 SAFE 的工具允许中断后重放；副作用工具
+    一律物化中断（架构不变量 5）。后台任务的自动重排（第 8 步）据此判定。
+    """
+    return spec.replay is ReplayPolicy.SAFE
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """调用载体：恢复与并发落盘的地基。"""
@@ -72,9 +87,12 @@ class BeforeVerdict:
     reason: str
 
 
-# ToolHooks：before 钩子 (name, params) -> BeforeVerdict | None（None=放行）；
-# after 钩子 ToolResult -> ToolResult（可替换结果）。
-ToolHooks = Callable[[str, dict], BeforeVerdict | None]
+# before_tool_call 契约： (工具名, 实际入参) -> BeforeVerdict | None。
+# None = 放行；block=True = 拦截并把 reason 作为错误结果返回模型（工具不执行）。
+# 多个钩子按装配顺序遍历，第一个 block 即短路；钩子本身不得抛异常给模型。
+BeforeToolHook = Callable[[str, dict], BeforeVerdict | None]
+AfterToolHook = Callable[[ToolResult], ToolResult]
+ToolHooks = BeforeToolHook  # 向后兼容别名（既有代码与测试用此名）
 
 
 class Tool(Protocol):
@@ -88,33 +106,31 @@ class Tool(Protocol):
     ) -> ToolResult: ...
 
 
-# ── 参数校验（手写，只支持标量；复合 schema 拒绝并给可读错误） ──
+# ── 参数校验（手写 JSON Schema 最小子集，零新增依赖） ──
 
 _SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
 
-_COMPLEX_MARKER = {"array", "object", "null", "anyOf", "oneOf", "allOf", "$ref"}
-
 
 def validate_params(spec: ToolSpec, params: dict) -> tuple[bool, str]:
-    """按 ToolSpec.parameters（JSON Schema 子集）校验入参。
+    """按 ToolSpec.parameters 校验**实际传入**的入参，返回 (ok, reason)。
 
-    返回 (ok, reason)。支持标量 (string/number/integer/boolean) + 顶层
-    required/enum/min/max（number+integer 的 min/max）；遇到 array/object
-    等复合 schema 一律拒绝并报“暂不支持”。这是手写校验器的显式债务——
-    首个需要复合参数的工具出现时引 jsonschema 库替换（tools.md 决策 1）。
+    支持：标量 (string/number/integer/boolean)、顶层 required、enum、
+    number/integer 的 minimum/maximum、string 的 minLength/maxLength，以及
+    `{"type":"array","items":{"type":<scalar>}}` 的最小子集（含元素类型、
+    minItems/maxItems）。object/null/anyOf/oneOf/allOf/$ref 等复合 schema
+    仍在显式债务内：遇到即给出可读的「不支持」错误，不静默放行。
+
+    设计原因：复合判定放在「实际值」循环内，声明层不预扫描全部属性——
+    声明了数组参数但本次不传的工具（如 delegate_subagent 只传 prompt）必须
+    能到达 execute，这是 L2-5 复合参数链路的根因修法。
     """
     schema = spec.parameters or {}
     props = schema.get("properties", {})
     top_type = schema.get("type")
 
-    # 复合 schema 拒绝：参数本身声明为 object 是合法的（工具入参本就是个对象），
-    # 但属性中的复合类型不支持。
+    # 参数本身声明为 object 是合法的（工具入参本就是个对象）。
     if top_type not in (None, "object"):
         return False, f"工具 {spec.name} 的参数 schema 顶层类型不支持：{top_type}"
-
-    for name, prop in props.items():
-        if _is_complex(prop):
-            return False, f"工具 {spec.name} 的参数 {name} 类型暂不支持（需复合 schema）"
 
     required = set(schema.get("required", []))
     missing = required - set(params.keys())
@@ -126,39 +142,70 @@ def validate_params(spec: ToolSpec, params: dict) -> tuple[bool, str]:
         if prop is None:
             return False, f"参数 {name} 不在 schema 内（多余字段）"
         ptype = prop.get("type")
-        if ptype not in _SCALAR_TYPES:
-            return False, f"参数 {name} 类型暂不支持：{ptype}"
-        # bool 是 int 的子类：integer 必须显式排除 bool，放 isinstance 之前判断。
-        if ptype == "integer" and isinstance(value, bool):
-            return False, f"参数 {name} 期望 integer，实际是 boolean"
-        if not isinstance(value, _SCALAR_TYPES[ptype]):
-            return False, f"参数 {name} 期望 {ptype}，实际是 {type(value).__name__}"
-        if "enum" in prop and value not in prop["enum"]:
-            return False, f"参数 {name} 值 {value!r} 不在允许集合 {prop['enum']!r}"
-        if isinstance(value, int) and not isinstance(value, bool):
-            lo, hi = prop.get("minimum"), prop.get("maximum")
-            if lo is not None and value < lo:
-                return False, f"参数 {name} 值 {value} 小于下限 {lo}"
-            if hi is not None and value > hi:
-                return False, f"参数 {name} 值 {value} 大于上限 {hi}"
-        if isinstance(value, str):
-            lo, hi = prop.get("minLength"), prop.get("maxLength")
-            if lo is not None and len(value) < lo:
-                return False, f"参数 {name} 长度 {len(value)} 小于下限 {lo}"
-            if hi is not None and len(value) > hi:
-                return False, f"参数 {name} 长度 {len(value)} 大于上限 {hi}"
+        if ptype in _SCALAR_TYPES:
+            ok, reason = _validate_scalar(name, ptype, value, prop)
+            if not ok:
+                return False, reason
+        elif ptype == "array":
+            ok, reason = _validate_array(name, value, prop)
+            if not ok:
+                return False, reason
+        else:
+            return False, f"参数 {name} 类型暂不支持（需复合 schema）：{ptype}"
 
     return True, ""
 
 
-def _is_complex(prop: dict) -> bool:
-    pt = prop.get("type")
-    if pt in ("array", "object", "null"):
-        return True
-    for key in _COMPLEX_MARKER:
-        if key in prop:
-            return True
-    return False
+def _validate_scalar(name: str, ptype: str, value: object, prop: dict) -> tuple[bool, str]:
+    """单个标量参数的校验（含 bool 不是 integer 的显式排除）。"""
+    expected = _SCALAR_TYPES[ptype]
+    # bool 是 int 的子类：integer 必须显式排除 bool，放 isinstance 之前判断。
+    if ptype == "integer" and isinstance(value, bool):
+        return False, f"参数 {name} 期望 integer，实际是 boolean"
+    if not isinstance(value, expected):
+        return False, f"参数 {name} 期望 {ptype}，实际是 {type(value).__name__}"
+    if "enum" in prop and value not in prop["enum"]:
+        return False, f"参数 {name} 值 {value!r} 不在允许集合 {prop['enum']!r}"
+    if isinstance(value, int) and not isinstance(value, bool):
+        lo, hi = prop.get("minimum"), prop.get("maximum")
+        if lo is not None and value < lo:
+            return False, f"参数 {name} 值 {value} 小于下限 {lo}"
+        if hi is not None and value > hi:
+            return False, f"参数 {name} 值 {value} 大于上限 {hi}"
+    if isinstance(value, str):
+        lo, hi = prop.get("minLength"), prop.get("maxLength")
+        if lo is not None and len(value) < lo:
+            return False, f"参数 {name} 长度 {len(value)} 小于下限 {lo}"
+        if hi is not None and len(value) > hi:
+            return False, f"参数 {name} 长度 {len(value)} 大于上限 {hi}"
+    return True, ""
+
+
+def _validate_array(name: str, value: object, prop: dict) -> tuple[bool, str]:
+    """复合 schema 的最小子集：`{"type":"array","items":{"type":<scalar>}}`。
+
+    只接受标量 items.type；items 缺失、items 为复合声明一律明确拒绝，
+    避免「声明看起来支持、实际没校验」的假通过。
+    """
+    if not isinstance(value, list):
+        return False, f"参数 {name} 期望 array，实际是 {type(value).__name__}"
+    items = prop.get("items")
+    if not isinstance(items, dict) or items.get("type") not in _SCALAR_TYPES:
+        return False, f"参数 {name} 的 array 元素声明不支持（需 items.type 为标量类型）"
+    item_type = items["type"]
+    for idx, item in enumerate(value):
+        if item_type == "integer" and isinstance(item, bool):
+            return False, f"参数 {name}[{idx}] 期望 integer，实际是 boolean"
+        if not isinstance(item, _SCALAR_TYPES[item_type]):
+            return False, (
+                f"参数 {name}[{idx}] 期望 {item_type}，实际是 {type(item).__name__}"
+            )
+    lo, hi = prop.get("minItems"), prop.get("maxItems")
+    if lo is not None and len(value) < lo:
+        return False, f"参数 {name} 元素数 {len(value)} 小于下限 {lo}"
+    if hi is not None and len(value) > hi:
+        return False, f"参数 {name} 元素数 {len(value)} 大于上限 {hi}"
+    return True, ""
 
 
 def _error(message: str) -> ToolResult:
@@ -194,8 +241,8 @@ class ToolRegistry:
 async def execute_tool_calls(
     calls: list[ToolCall],
     registry: ToolRegistry,
-    before_hooks: list[ToolHooks] | None = None,
-    after_hooks: list[Callable[[ToolResult], ToolResult]] | None = None,
+    before_hooks: list[BeforeToolHook] | None = None,
+    after_hooks: list[AfterToolHook] | None = None,
     cancel: asyncio.Event | None = None,
 ) -> list[ToolResult]:
     """对一批 ToolCall 执行三段式：prepare 串行 → execute → finalize 串行。

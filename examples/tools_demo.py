@@ -22,7 +22,7 @@ def main():
     task = (
         "请用工具做三件事："
         "1) 读 README.md 的第一行，告诉我项目名；"
-        "2) 写一个文件 _data/hello.txt，内容为 'Hello DemoClaw'；"
+        "2) 写一个文件 _data/hello.txt，内容为 'Hello DemoHarness'；"
         "3) 运行 `ls examples` 并把输出告诉我。"
     )
     result = arch.run(task)

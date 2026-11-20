@@ -1,7 +1,7 @@
-"""DemoClaw · BotRuntime 组合根（runtime.py）。
+"""DemoHarness · BotRuntime 组合根（runtime.py）。
 
-唯一知道全部部件的地方；外部（Web、测试、教学示例）一律经本模块的 API
-使用 DemoClaw，不直接 import core/ 细节。
+唯一知道全部部件的地方；外部（SDK 调用方、测试、教学示例）一律经本模块的 API
+使用 DemoHarness，不直接 import core/ 细节。
 
 门面契约（见 docs/design/botruntime-api.md）：
 
@@ -162,13 +162,13 @@ class BotSpec:
 
 @dataclass
 class RuntimeConfig:
-    # 运行时数据统一放用户目录 ~/.democlaw/（不建 data/ 目录进项目）：
-    #   - db（SQLite）→ ~/.democlaw/democlaw.db
-    #   - workspace（bot 工作区）→ ~/.democlaw/workspace/
+    # 运行时数据统一放用户目录 ~/.demoharness/（不建 data/ 目录进项目）：
+    #   - db（SQLite）→ ~/.demoharness/demoharness.db
+    #   - workspace（bot 工作区）→ ~/.demoharness/workspace/
     # 这两类都是运行产物，不进 git。教学样例（bots/）在项目内、进 git。
-    db_path: str | Path = Path.home() / ".democlaw" / "democlaw.db"
+    db_path: str | Path = Path.home() / ".demoharness" / "demoharness.db"
     bots_dir: str | Path = Path("bots")
-    workspace_root: str | Path = Path.home() / ".democlaw" / "workspace"
+    workspace_root: str | Path = Path.home() / ".demoharness" / "workspace"
     model: str = "openai/gpt-4o"
     api_key_env: str = "OPENAI_API_KEY"
     max_iterations: int = 50
@@ -246,9 +246,10 @@ class BotRuntime:
         # 临时 system prompt：聚焦 prompt 即子任务
         from .core.loop import LoopRuntime
 
+        stream_fn = self.config.stream_fn or self._default_stream_fn()
         loop_runtime = LoopRuntime(
             session_mgr=self._session_mgr,
-            stream_fn=self.config.stream_fn or (self._default_stream_fn()),
+            stream_fn=stream_fn,
             registry=sub_registry,
             event_bus=self._bus,
             system_prompt=prompt,
@@ -257,6 +258,7 @@ class BotRuntime:
             context_window=self.config.context_window,
             finish_turn=lambda ctx: False,
             cancel=cancel,
+            compaction=self._make_compactor(self.config.model, stream_fn),
         )
         await self._session_mgr.submit(sid, AppendOp(sid, "user", prompt, parent=None, task_id=task_id))
         self._session_mgr.mark_running(sid, task_id)
@@ -271,6 +273,17 @@ class BotRuntime:
         if not key:
             raise RuntimeError(f"缺少 API key：环境变量 {self.config.api_key_env} 未设置")
         return make_openai_stream_fn(key)
+
+    def _make_compactor(self, model: str, stream_fn):
+        """装配压缩扩展（第 6 步）：复用当前模型的 stream_fn 做摘要（分歧 6 默认）。"""
+        from .compaction import Compactor
+
+        return Compactor(
+            session_mgr=self._session_mgr,
+            stream_fn=stream_fn,
+            model=model,
+            context_window=self.config.context_window,
+        )
 
     # ── 同步/async 双形态 ──
 
@@ -354,7 +367,7 @@ class BotRuntime:
         return self._sync(self._session_mgr.submit(session_id, HistoryOp(session_id)))
 
     def set_session_model(self, session_id: str, model: str) -> None:
-        """写会话层模型覆盖（Web 设置面切换模型）。"""
+        """写会话层模型覆盖（SDK 会话级配置）。"""
         def _do():
             with self._storage.transaction() as conn:
                 conn.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, session_id))
@@ -443,7 +456,7 @@ class Bot:
             loop = asyncio.get_running_loop()
         except RuntimeError as e:
             raise RuntimeError(
-                "start() 需要 async 语境（用于 Web/SSE 后台运行）；同步语境请用 run()"
+                "start() 需要 async 语境（用于后台任务/异步事件观察）；同步语境请用 run()"
             ) from e
         sid = session_id
         if sid is None:
@@ -506,16 +519,18 @@ class Bot:
                     f"或 export {rt.config.api_key_env}=sk-..."
                 )
             stream_fn = make_openai_stream_fn(key)
+        model = model or self._spec.model or rt.config.model
         return LoopRuntime(
             session_mgr=rt._session_mgr,
             stream_fn=stream_fn,
             registry=rt._registry,
             event_bus=rt._bus,
             system_prompt=self._spec.system_prompt,
-            model=model or self._spec.model or rt.config.model,
+            model=model,
             max_iterations=max_iterations or rt.config.max_iterations,
             context_window=rt.config.context_window,
             finish_turn=lambda ctx: False,
             cancel=cancel,
             before_hooks=[rt.plan_mode.before_hook] if rt.plan_mode.enabled else [],
+            compaction=rt._make_compactor(model, stream_fn),
         )

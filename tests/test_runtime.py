@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from democlaw.core.loop import ModelResponse, ModelStop
-from democlaw.core.task import StopReason
-from democlaw.runtime import BotRuntime, RuntimeConfig
+from demoharness.core.loop import ModelResponse, ModelStop
+from demoharness.core.task import StopReason
+from demoharness.runtime import BotRuntime, RuntimeConfig
 
 
 def _mk_bots_dir(tmp_path):
@@ -62,8 +62,8 @@ def test_session_tree_verbs(tmp_path):
 
 def test_sessions_with_interrupted(tmp_path):
     """模拟：一个会话被 interrupted，sessions_with(INTERRUPTED) 能发现它。"""
-    from democlaw.core.session import AppendOp, NewOp
-    from democlaw.core.task import materialize_interrupted
+    from demoharness.core.session import AppendOp, NewOp
+    from demoharness.core.task import materialize_interrupted
 
     rt = BotRuntime.build(RuntimeConfig(db_path=str(tmp_path / "rec.db")))
     # 直接操作 core 层构造 interrupted 会话（门面层无运行中的任务）

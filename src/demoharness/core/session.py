@@ -1,8 +1,8 @@
-"""DemoClaw 内核 · 会话拥有者（core/session.py）。
+"""DemoHarness 内核 · 会话拥有者（core/session.py）。
 
 会话拥有者：每个会话一个 FIFO，串行化对该会话的一切写入；所有动词
-（append/reset/compact/delete/fork）都投给目标会话的 FIFO 执行。分层
-原则：本层组装业务语义（什么是 reset、重放怎么走），SQL 一律交给
+（append/reset/compact/delete/fork/set_model）都投给目标会话的 FIFO 执行。
+分层原则：本层组装业务语义（什么是 reset、重放怎么走），SQL 一律交给
 storage.py。
 
 核心模型（见 docs/design/storage-session.md）：
@@ -22,6 +22,11 @@ running 状态机（本模块定死，登记方是 task.py / loop.py）：
 
 mark_running / clear_running 是公开方法兼测试钩子：测试可直接调模拟忙碌，
 无需依赖 task.py。
+
+第一阶段契约冻结（T01）：NewOp 带齐后台三列（background /
+origin_parent_id / restart_count），CompactOp 的 running 守卫与
+COMPACTION_STARTED publish 点在本模块，SetModelOp 让会话层模型覆盖经
+会话 FIFO 写入（不再由门面直接发 SQL，见架构不变量 1）。
 """
 
 from __future__ import annotations
@@ -31,12 +36,15 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .events import EventBus, compaction_started_event
 from .storage import EntryRow, SessionRow, Storage
 
-# entry kind 全集（多 Agent / 后台任务的第 7、8 步会扩展新 kind，见
-# multi-agent.md——此处只含第 1 步需要的边界与恢复相关 kind）。
+# entry kind 约定（唯一显著定义处；多 Agent / 后台任务会继续扩展）。
 INTERRUPTED_KIND = "interrupted"
 BOUNDARY_KINDS = ("compaction", "reset")
+# 验证失败的纠正证据：由 loop.py 在 finish_turn 判失败时落盘，下一轮重放
+# 自然携带给模型自纠（不新增第七态，见 architecture.md 六态闭表）。
+VERIFICATION_FAILED_KIND = "verification_failed"
 
 
 class SessionNotFound(Exception):
@@ -65,6 +73,10 @@ class NewOp(SessionOp):
     bot_id: str
     model: str | None = None
     title: str | None = None
+    # 后台任务三列（第 8 步编排消费；本轮冻结形状，不实现编排）。
+    background: bool = False
+    origin_parent_id: str | None = None
+    restart_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,13 @@ class AppendOp(SessionOp):
     parent: str | None
     # 任务归属：任务内的 append 都带 task_id（供 running_task 查询与审计）。
     task_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SetModelOp(SessionOp):
+    """会话层模型覆盖：config 三层链的「会话」层写入动词（经 FIFO 串行）。"""
+
+    model: str | None
 
 
 @dataclass(frozen=True)
@@ -88,8 +107,15 @@ class ResetOp(SessionOp):
 
 @dataclass(frozen=True)
 class CompactOp(SessionOp):
+    """压缩提交形状（两段式的第二段）：事务外生成摘要 → 事务内校验 leaf 后落盘。
+
+    `during_task=True` 用于 loop 在任务边界触发的压缩——此时 running_task 非空
+    但 FIFO 空闲、无并发 append，允许提交（区别于手动对空闲会话的 compact）。
+    """
+
     summary: str
     leaf: str | None = None
+    during_task: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,8 +180,10 @@ def _tree_sessions(all_sessions: list[SessionRow], root_id: str) -> list[str]:
 
 
 class SessionManager:
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: Storage, event_bus: EventBus | None = None):
         self._storage = storage
+        # 可选事件总线：core 内部只做活体推送（不变量 6），未注入时静默跳过。
+        self._event_bus = event_bus
         # 内存态：会话 id -> 队列 (list) 与 worker 存在标记。
         self._queues: dict[str, list[tuple[SessionOp, asyncio.Future]]] = {}
         self._workers: dict[str, asyncio.Task] = {}
@@ -238,6 +266,8 @@ class SessionManager:
     async def _run_op(self, op: SessionOp) -> Any:
         if isinstance(op, AppendOp):
             return self._append(op)
+        if isinstance(op, SetModelOp):
+            return self._set_model(op)
         if isinstance(op, ForkOp):
             return self._fork(op)
         if isinstance(op, ResetOp):
@@ -274,9 +304,9 @@ class SessionManager:
                 model=op.model,
                 title=op.title,
                 created_at=time.time(),
-                origin_parent_id=None,
-                background=False,
-                restart_count=0,
+                origin_parent_id=op.origin_parent_id,
+                background=op.background,
+                restart_count=op.restart_count,
             )
             self._storage.insert_session(conn, row)
         return self._info(row)
@@ -302,6 +332,13 @@ class SessionManager:
             self._storage.insert_entry(conn, row)
             self._storage.update_active_leaf(conn, sid, eid)
         return eid
+
+    def _set_model(self, op: SetModelOp) -> None:
+        """会话层模型覆盖：经会话 FIFO 串行写，SQL 只在 storage 层。"""
+        with self._storage.transaction() as conn:
+            if self._storage.session(op.session_id) is None:
+                raise SessionNotFound(op.session_id)
+            self._storage.update_session_model(conn, op.session_id, op.model)
 
     def _fork(self, op: ForkOp) -> SessionInfo:
         sid = op.session_id
@@ -391,10 +428,16 @@ class SessionManager:
 
     def _compact(self, op: CompactOp) -> bool:
         sid = op.session_id
+        # 形状守卫：compact 只在任务边界执行；忙碌会话拒绝（与 reset 同语义）。
+        # 事务外摘要 + 事务内提交的两段式由 compaction/ 扩展（第 6 步）驱动，
+        # 本守卫保证它不会与进行中的任务抢活跃叶。during_task=True 是 loop 在
+        # 任务边界内的合法提交路径（FIFO 此刻空闲、无并发 append）。
+        if self.running_task(sid) is not None and not op.during_task:
+            raise SessionBusy(sid)
         with self._storage.transaction() as conn:
             s = self._storage.session(sid)
             # 最后防线：活跃叶未漂移才允许落摘要；漂移即放弃（返回 False），
-            # 扩展层下轮再试。主机制是扩展层在任务边界触发（无并发 append）。
+            # 扩展层下轮再试。
             if op.leaf is not None and s.active_leaf != op.leaf:
                 return False
             eid = self._storage.mint_entry_id(conn)
@@ -408,6 +451,9 @@ class SessionManager:
             )
             self._storage.insert_entry(conn, row)
             self._storage.update_active_leaf(conn, sid, eid)
+        # 提交成功后发 COMPACTION_STARTED（事件流只做活体推送，事实仍以 entry 为准）。
+        if self._event_bus is not None:
+            self._event_bus.publish(compaction_started_event("", sid, op.summary))
         return True
 
     def _delete(self, op: DeleteOp) -> None:

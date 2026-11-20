@@ -1,6 +1,6 @@
 """strategies/plan_mode.py 的验收测试。"""
 
-from democlaw.strategies.plan_mode import (
+from demoharness.strategies.plan_mode import (
     PlanMode,
     extract_todo_items,
     is_safe_command,

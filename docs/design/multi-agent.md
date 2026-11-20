@@ -119,4 +119,4 @@ class SubagentInput:
 1. 分歧 8 的「增三条列 vs 完全零改动」
 2. 后台重排「内核报告、扩展编排」的归属划分
 3. restart 计数独立化 + safe 续跑落新分支
-4. 补一个真实模型场景（多 bot 协作 + 后台任务 + kill 重启）作为本模块的端到端证据（正文交给 web-scenarios.md）
+4. 补一个真实模型场景（多 bot 协作 + 后台任务 + kill 重启）作为本模块的端到端证据（正文交给 scenarios.md）

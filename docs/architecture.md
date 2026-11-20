@@ -1,16 +1,16 @@
-# DemoClaw 架构
+# DemoHarness 架构
 
-本文描述 DemoClaw 的整体结构：模块划分、核心流程、数据形态与扩展方式。能力范围与阶段划分见 [agent-feature-scope.md](./specs/agent-feature-scope.md)；开发规约见 [AGENTS.md](../AGENTS.md)。
+本文描述 DemoHarness 的整体结构：模块划分、核心流程、数据形态与扩展方式。能力范围与阶段划分见 [agent-feature-scope.md](./specs/agent-feature-scope.md)；开发规约见 [AGENTS.md](../AGENTS.md)。
 
 ## 一句话架构
 
-DemoClaw 是一个**完整的、教学目的的 Agent harness**（上下文管理 + 工具接口 + 约束 + 验证 + 纠正；Agent = Model + Harness，定义自李博杰《深入理解 AI Agent》）。第一阶段以 SDK 形态交付这个 harness（类似 pi 的 `createAgentSession`）：通过 Python API 创建 bot、提交任务、获取结果，用完即走——不是常驻服务。微内核结构：**内核只做四件事——驱动任务循环、拥有会话存储、调用工具、提交状态**；其余一切（模型接入、工具实现、压缩策略、Web 界面、执行策略）都是挂在内核注入点上的扩展。
+DemoHarness 是一个**完整的、教学目的的 Agent harness**（上下文管理 + 工具接口 + 约束 + 验证 + 纠正；Agent = Model + Harness，定义自李博杰《深入理解 AI Agent》）。第一阶段以 SDK 形态交付这个 harness（类似 pi 的 `createAgentSession`）：通过 Python API 创建 bot、提交任务、获取结果，用完即走——不是常驻服务。微内核结构：**内核只做四件事——驱动任务循环、拥有会话存储、调用工具、提交状态**；其余一切（模型接入、工具实现、压缩策略、执行策略）都是挂在内核注入点上的扩展。
 
 ```
-   交互层（调用方）
+   调用方
   ┌───────────────────────┐
-  │  web/                 │
-  │  观察 / 互动 / 设置    │
+  │  SDK / 测试 / 示例     │
+  │  运行 / 观察 / 控制    │
   └───────────┬───────────┘
               │ 调用 SDK API（build / run / steering / cancel / 读状态）
               ▼
@@ -32,13 +32,13 @@ DemoClaw 是一个**完整的、教学目的的 Agent harness**（上下文管�
       SQLite（会话存储）
 ```
 
-依赖方向只有一个：**能力扩展 → core/（经注入点），core/ 不 import 任何扩展**。BotRuntime（`runtime.py`）是唯一知道全部部件的地方；外部（Web、测试、教学示例）一律经 BotRuntime 的 API 使用 DemoClaw。
+依赖方向只有一个：**能力扩展 → core/（经注入点），core/ 不 import 任何扩展**。BotRuntime（`runtime.py`）是唯一知道全部部件的地方；外部（SDK 调用方、测试、教学示例）一律经 BotRuntime 的 API 使用 DemoHarness。
 
 ## 模块地图
 
 ```text
-DemoClaw/
-├── src/democlaw/
+DemoHarness/
+├── src/demoharness/
 │   ├── runtime.py    # BotRuntime 组合根：build(config) 装配一切，暴露 SDK API
 │   ├── core/         # 内核（约 1200-1800 行，参照值非硬约束）
 │   │   ├── loop.py   # 任务循环骨架（ReAct 形态：思考→工具→观察→再判断）
@@ -51,7 +51,6 @@ DemoClaw/
 │   ├── tools/        # 具体工具实现（读写文件、执行命令等）
 │   ├── compaction/   # 上下文压缩（触发与切点算法）
 │   └── providers/    # 模型接入（stream_fn 的具体实现；OpenAI 兼容最小实现）
-├── web/              # Web 界面（旁路体验工程，构建在 SDK 之上的薄壳，不属于 agent 功能本体）
 ├── scenarios/        # 教学场景（项目根）：真实模型驱动的复杂场景剧本，
 │                     #   综合运用各项特性，含输入/过程/证据/复现步骤
 ├── tests/            # 测试（mock 模型，确定性）
@@ -72,12 +71,12 @@ DemoClaw/
 | 持久化细节 | Storage 协议：`commit(writes) + 查询面`。SQLite 是唯一实现 | （协议留边界，不写第二实现） |
 | 权限与边界 | `before_tool_call` / `after_tool_call`：工具执行前后的钩子，前者可拦截调用 | 工具权限检查、审计 |
 | 上下文裁剪 | `transform_context`（组上下文前的裁剪）+ 每轮工具执行完的检查点 | compaction/ |
-| 新输入 | steering 与 follow-up 两类回调（见下）+ 会话 FIFO | 调用方（Web / SDK 使用者） |
+| 新输入 | steering 与 follow-up 两类回调（见下）+ 会话 FIFO | SDK 调用方 |
 | 预算与终止 | `finish_turn`：每轮结束时的决策函数，返回 `{end, continue}`。**结果验证在这里消费证据**——验证是扩展，经此决定任务是否完成 | 各策略/验证器 |
 | 取消 | `cancel()` API：取消信号传播到 stream_fn 与工具执行 | 调用方 |
 | 工具实现 | 工具注册表：装配时显式注册，每工具声明 `name / schema / execute / 并发安全 / replay`（replay 声明中断后该工具是否可安全重放） | tools/ |
 | 会话树操作 | 会话树动词（见数据形态一节），守卫保护忙碌会话 | （经由会话 FIFO 或守卫调用） |
-| 界面 | 事件流：内核产出事件，消费即扩展 | web/ |
+| 活体观察 | 事件流：内核产出事件，SDK 调用方、测试与示例消费 | — |
 
 判断"新能力属于内核还是扩展"的标准：**循环跑不起来没有它吗**——是则内核，否则扩展。
 
@@ -203,10 +202,6 @@ bot 接到一个任务并决定拆分后，每个子任务有三种执行去向�
 
 **后台模式与 Agent View**（第一阶段，第 8 步落地）：subagent 可后台执行——发起后不等待，父会话继续工作；完成后结果作为 follow-up 输入回投父会话（经会话 FIFO 送达，不打断进行中的 turn）。后台任务在进程重启后存活：恢复扫描发现后台 Task 未终态时**自动重新排队**（区别于前台任务的"物化中断+显式续跑"——后台任务的意义就是无人值守），仅 phase 在 awaiting_tools 之前且工具声明 replay=safe 的调用可重放，副作用工具一律物化中断；同一任务链 interrupted 计数即重启计数，超 3 停车待人工。观察侧为 Agent View：后台任务列表（Task 状态 + 子会话入口），每个后台任务是一个可观察的 background session。
 
-## Web 界面（交互层，旁路体验工程）
-
-构建在 SDK 之上的薄壳，不属于 agent 功能本体，可独立成工程。Python 后端（SSE 活体推送）+ 原生前端（不用框架）。三个界面：观察（事件流 + 会话历史）、互动（发任务 / steering）、设置（config 读写）。历史重建永远查存储，不把事件流当历史源。
-
 ## 场景模拟（scenarios/，项目根）
 
 教学场景库：每个场景是一个模拟现实任务的复杂剧本（真实模型驱动，不做模拟数据的玩具示例），完成过程综合运用多项特性。每个场景提供：场景描述、输入、预期过程、完成证据、复现步骤——这是「功能不减配」准则的落地：每个特性的价值必须有一个可复现的场景作证据。场景随特性逐步建成，每个场景力求覆盖多个特性（如：长程任务 + 工具失败重试 + 中断恢复 + 压缩触发）。常规测试（tests/，mock 模型保证确定性）与场景（真实模型演示）是互补的两层：测试验证代码正确，场景演示能力价值。
@@ -232,7 +227,7 @@ bot 接到一个任务并决定拆分后，每个子任务有三种执行去向�
 - **单进程 asyncio**；sqlite3 直接在事件循环线程执行（短事务可接受，恢复重放是同步 O(n)，教学规模接受）
 - **SQLite**（WAL + synchronous=NORMAL，本地盘）为唯一持久化实现；测试用临时文件 SQLite
 - **会话 FIFO 为内存态**，用户输入在任务开始前早落盘；重启丢排队中的 steering，下次提交即恢复
-- 排除（第一阶段不做）：gateway 常驻、cron 定时调度、外部 channel、交互式 CLI、跨进程扩展点（epoch/lease/OFD 锁/worker 词汇表）、插件加载发现机制、PRAGMA 防御全家桶
+- 排除（第一阶段不做）：gateway 常驻、cron 定时调度、外部 channel、交互式 CLI、Web 界面、跨进程扩展点（epoch/lease/OFD 锁/worker 词汇表）、插件加载发现机制、PRAGMA 防御全家桶
 
 ## 阅读顺序（新人动线）
 
@@ -250,6 +245,6 @@ bot 接到一个任务并决定拆分后，每个子任务有三种执行去向�
 | 4 | finish_turn 是否配教学示例验证器 | 只留签名 vs 给示例验证器 | 只留签名 | loop-providers.md 分歧 4 |
 | 5 | 会话层模型存储 | sessions 表补 model 列 vs sidecar | 补列（已完成） | events-bots.md 分歧 5 |
 | 6 | 压缩摘要用哪个模型 | 当前模型 vs spec 加 compaction_model 字段 | 当前模型 | compaction.md 分歧 6 |
-| 7 | 场景数量 | 三场景 vs 加多 bot 协作 | 四场景（多 bot 协作场景随多 Agent 进第一阶段而纳入） | web-scenarios.md 分歧 7 |
+| 7 | 场景数量 | 三场景 vs 加多 bot 协作 | 四场景（多 bot 协作场景随多 Agent 进第一阶段而纳入） | scenarios.md 分歧 7 |
 
 任何一项“按默认执行”即可放行；逐项异议在对应设计稿的「留用户决策」节展开。

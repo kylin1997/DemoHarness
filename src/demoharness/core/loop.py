@@ -1,4 +1,4 @@
-"""DemoClaw 内核 · 任务循环骨架（core/loop.py）。
+"""DemoHarness 内核 · 任务循环骨架（core/loop.py）。
 
 **唯一的真循环**（task.py 是纯函数库，见 loop-providers.md「模块收敛」）。
 ReAct 形态：思考 → 工具 → 观察 → 再判断，直到终态。
@@ -6,8 +6,13 @@ ReAct 形态：思考 → 工具 → 观察 → 再判断，直到终态。
 注入点契约（架构「内核与扩展的边界」）：
 - stream_fn：调用模型的函数，每轮调用一次，**不得抛异常**（一切失败编码进
   ModelResponse.stop_reason）。providers/ 是具体实现。
-- finish_turn：每轮结束时的决策函数，返回 {end, continue}；结果验证经此
-  消费证据。
+- finish_turn：每轮结束时的决策函数，返回 VerifyVerdict(passed, reason,
+  evidence)；**结果验证在此消费证据**——验证器是扩展（strategies/verification.py），
+  由 BotRuntime 装配期注入同一个实例。只有 passed=True 才允许 completed；
+  验证失败不新增第七态，而是把失败原因落为 verification_failed 证据 entry，
+  下一轮重放自然携带 → 模型自纠 → 再次验证 → 达 max_verify_retries 以
+  StopReason.ERROR 收尾（六态闭表不变）。
+- transform_context：组上下文前的裁剪注入点（compaction/ 第 6 步挂接）。
 - before/after 工具钩子经 tools.py 三段式，loop 不直接管权限。
 
 三相 ↔ loop 步骤 ↔ append 落点（唯一权威 = loop-providers.md 对应表）：
@@ -16,9 +21,9 @@ ReAct 形态：思考 → 工具 → 观察 → 再判断，直到终态。
   tools_completed → 三段式执行完 → append tool_result entries
   final_response → 终答 → append 终态 assistant entry（content 带 stop_reason）
 
-stop_reason 六态触发源：completed=模型无工具调用 / error=stream_fn 编码错误
-（含 LENGTH 过渡期）/ max_iterations=预算 / cancelled=信号 / empty_response=
-模型空返回 / interrupted=恢复物化专属（本模块异常路径调 task.py 物化）。
+stop_reason 六态触发源：completed=模型无工具调用且验证通过 / error=stream_fn
+编码错误或验证失败达上限 / max_iterations=预算 / cancelled=信号 /
+empty_response=模型空返回 / interrupted=恢复物化专属。
 """
 
 from __future__ import annotations
@@ -36,15 +41,23 @@ from .events import (
     TASK_STARTED,
     Event,
     EventBus,
+    TaskPhase,
+    text_delta_event,
 )
-from .session import AppendOp, SessionManager
+from .session import VERIFICATION_FAILED_KIND, AppendOp, SessionManager
 from .storage import EntryRow
 from .task import (
+    TOOL_RESULT_KIND,
     StopReason,
     materialize_interrupted,
     terminal_content,
 )
-from .tools import ToolRegistry, ToolSpec, execute_tool_calls
+from .tools import (
+    BeforeToolHook,
+    ToolRegistry,
+    ToolSpec,
+    execute_tool_calls,
+)
 
 
 class ModelStop(Enum):
@@ -75,7 +88,25 @@ class ModelResponse:
 
 
 StreamFn = Callable[[ModelRequest, asyncio.Event], "asyncio.Coroutine[Any, Any, ModelResponse]"]
-FinishTurn = Callable[["LoopContext"], bool]
+
+
+@dataclass(frozen=True)
+class VerifyVerdict:
+    """finish_turn 的裁决（公开类型，唯一定义处）。
+
+    - passed：是否允许以 completed 收尾（不凭模型自称，要消费证据）。
+    - reason：失败原因，落进 verification_failed 证据 entry 与 TaskResult.error。
+    - evidence：可机械判定的结构化证据（数量/配对/命中项等），供 SDK 与测试断言。
+    """
+
+    passed: bool
+    reason: str = ""
+    evidence: dict = field(default_factory=dict)
+
+
+FinishTurn = Callable[["LoopContext"], VerifyVerdict]
+# 上下文裁剪注入点：entry 流水 -> 裁剪后的 entry 流水（压缩扩展第 6 步实现）。
+TransformContext = Callable[[list[EntryRow]], list[EntryRow]]
 
 
 @dataclass(frozen=True)
@@ -98,11 +129,14 @@ class LoopContext:
     tools_used: int
     last_text: str
     last_tool_calls: list[ToolCallRaw]
+    # 本轮上下文中的全部 tool_result entry（取自 entry_prefix，即 entry 流水）。
+    # 历史事实只来自 entry（架构不变量 6），验证器据此机械配对与判定。
+    last_tool_results: list[EntryRow] = field(default_factory=list)
 
 
 @dataclass
 class LoopRuntime:
-    """loop 需要的全部注入依赖（BotRuntime 装配期拼装）。"""
+    """loop 需要的全部注入依赖（BotRuntime 装配期拼装，唯一构造路径）。"""
 
     session_mgr: SessionManager
     stream_fn: StreamFn
@@ -114,8 +148,15 @@ class LoopRuntime:
     context_window: int
     finish_turn: FinishTurn
     cancel: asyncio.Event | None = None
-    # 工具执行前的钩子（before_tool_call）：扩展策略（如 plan_mode 的只读约束）经此注入。
-    before_hooks: list = field(default_factory=list)
+    # 工具执行前的钩子（before_tool_call）：约束扩展经此注入，按顺序遍历。
+    before_hooks: list[BeforeToolHook] = field(default_factory=list)
+    # 上下文裁剪注入点（compaction/ 第 6 步挂接；本轮冻结签名，默认不裁剪）。
+    transform_context: TransformContext | None = None
+    # 压缩扩展（第 6 步）：loop 只调用其 should_compact_for / compact 方法，
+    # 不反向 import compaction（鸭子类型，避免环）。
+    compaction: Any | None = None
+    # 验证失败的有界纠正回路上限（达到即以既有 ERROR 终态收尾，不无限重试）。
+    max_verify_retries: int = 3
 
 
 @dataclass(frozen=True)
@@ -153,6 +194,8 @@ def project_context(replayed: list[EntryRow]) -> list[dict]:
     - compaction entry → {"role": "user", "content": 摘要}
     - reset entry → 跳过（边界后的新起点）
     - interrupted entry → {"role": "tool", "content": "Task interrupted"}
+    - verification_failed entry → {"role": "user", "content": 失败原因与重试提示}
+      （验证纠正回路：证据落盘后必须能进入下一轮模型上下文，模型才可能自纠）
     """
     messages: list[dict] = []
     i = 0
@@ -210,10 +253,24 @@ def project_context(replayed: list[EntryRow]) -> list[dict]:
         elif e.kind == "interrupted":
             messages.append({"role": "tool", "content": "Task interrupted"})
             i += 1
+        elif e.kind == VERIFICATION_FAILED_KIND:
+            messages.append({"role": "user", "content": _verification_hint(e.content)})
+            i += 1
         else:
             # reset / tool_call：跳过
             i += 1
     return messages
+
+
+def _verification_hint(content: str) -> str:
+    """把验证失败证据 entry 投影成给模型的自纠提示（不吞掉失败原因）。"""
+    c = _parse(content)
+    if not isinstance(c, dict):
+        return f"【验证未通过】{content}；请补齐证据后重新作答。"
+    attempt = c.get("attempt", "?")
+    limit = c.get("max_verify_retries", "?")
+    reason = c.get("reason", "")
+    return f"【验证未通过·第 {attempt}/{limit} 次】{reason}；请补齐证据后重新作答。"
 
 
 def _parse(content: str) -> dict | str:
@@ -251,6 +308,7 @@ async def run_task_loop(
     cancel = runtime.cancel or asyncio.Event()
     iterations = 0
     tools_used = 0
+    verify_failures = 0
 
     runtime.event_bus.publish(
         Event(
@@ -263,12 +321,25 @@ async def run_task_loop(
 
     try:
         while True:
-            # a. steering drain：执行本会话 FIFO 里排队的 steering（user）append
+            # a. steering drain：steering 的活体事件由门面 TaskHandle.steer
+            #    publish；user entry 已在会话 FIFO 落盘，重放自然携带。
             await _drain_steering(runtime, task_id, sid)
 
-            # b. 组装上下文（从活跃叶重放 → OpenAI 投影）
-            prefix = await _replay_prefix(runtime.session_mgr, sid)
-            messages = project_context(prefix)
+            # a2. 取消/预算是硬边界：信号已置则本轮起不再调用 stream_fn 与工具。
+            if cancel.is_set():
+                return await _finish(
+                    runtime, sid, task_id, "", StopReason.CANCELLED, iterations, tools_used
+                )
+
+            # a3. 压缩检查（第 6 步）：每轮组装前判定阈值，超限则两段式压缩；
+            #     压缩后下一轮从新活跃叶重放，本循环自然用压缩后的上下文。
+            if runtime.compaction is not None:
+                _pre = await _replay_prefix(runtime.session_mgr, sid)
+                if runtime.compaction.should_compact_for(_pre):
+                    await runtime.compaction.compact(sid, _pre)
+
+            # b. 组装上下文（从活跃叶重放 → 注入点裁剪 → OpenAI 投影）
+            prefix, messages = await _context_messages(runtime, sid)
             request = ModelRequest(
                 system_prompt=runtime.system_prompt,
                 messages=messages,
@@ -280,6 +351,10 @@ async def run_task_loop(
             # c. 调用模型（stream_fn 不得抛异常）
             resp = await runtime.stream_fn(request, cancel)
 
+            # c2. 文本活体事件：非流式 provider 一整段即 final=true 终帧。
+            if resp.text:
+                runtime.event_bus.publish(text_delta_event(task_id, sid, resp.text, True))
+
             # d. 响应分类 → 映射到任务六态
             if resp.stop_reason == ModelStop.ABORTED:
                 return await _finish(runtime, sid, task_id, "", StopReason.CANCELLED, iterations, tools_used)
@@ -289,6 +364,12 @@ async def run_task_loop(
                     error=resp.error or "模型调用错误",
                 )
             if resp.stop_reason == ModelStop.LENGTH:
+                # 压缩扩展：LENGTH → 压缩后重发一次（同轮重试，不计 iterations）；
+                # 压缩成功则 continue 回循环顶、用压缩后上下文再调模型，仍超才 error。
+                if runtime.compaction is not None:
+                    _pre = await _replay_prefix(runtime.session_mgr, sid)
+                    if await runtime.compaction.compact(sid, _pre):
+                        continue
                 return await _finish(
                     runtime, sid, task_id, "", StopReason.ERROR, iterations, tools_used,
                     error="上下文超限（LENGTH）",
@@ -299,7 +380,8 @@ async def run_task_loop(
             if resp.tool_calls:
                 await _append(runtime, sid, "assistant", _assistant_content(resp.text, resp.tool_calls))
                 runtime.event_bus.publish(
-                    Event(task_id=task_id, session_id=sid, type=PHASE_CHANGED, data={"phase": "awaiting_tools"})
+                    Event(task_id=task_id, session_id=sid, type=PHASE_CHANGED,
+                          data={"phase": TaskPhase.AWAITING_TOOLS})
                 )
                 from .tools import ToolCall
 
@@ -328,15 +410,60 @@ async def run_task_loop(
                     )
                     tools_used += 1
                 runtime.event_bus.publish(
-                    Event(task_id=task_id, session_id=sid, type=PHASE_CHANGED, data={"phase": "tools_completed"})
+                    Event(task_id=task_id, session_id=sid, type=PHASE_CHANGED,
+                          data={"phase": TaskPhase.TOOLS_COMPLETED})
                 )
                 iterations += 1
                 if iterations >= runtime.max_iterations:
                     return await _budget_finish(runtime, sid, task_id, iterations, tools_used, cancel)
                 continue
 
-            # 纯文本（无工具调用）→ 终态 completed
-            return await _finish(runtime, sid, task_id, resp.text, StopReason.COMPLETED, iterations, tools_used)
+            # e. 纯文本（无工具调用）：finish_turn 决策——结果验证在此消费证据。
+            #    只有验证通过才允许 completed；不凭模型自称「已完成」。
+            ctx = LoopContext(
+                session_id=sid,
+                task_id=task_id,
+                entry_prefix=prefix,
+                iterations=iterations,
+                tools_used=tools_used,
+                last_text=resp.text,
+                last_tool_calls=[],
+                last_tool_results=_tool_results_of(prefix),
+            )
+            verdict = _coerce_verdict(runtime.finish_turn(ctx))
+            if verdict is None or verdict.passed:
+                return await _finish(
+                    runtime, sid, task_id, resp.text, StopReason.COMPLETED, iterations, tools_used
+                )
+
+            # 验证失败：不新增第七态——失败原因落为证据 entry，下一轮重放自然
+            # 携带（project_context 投影为自纠提示）→ 模型自纠 → 再次验证；
+            # 达到 max_verify_retries 以既有 ERROR 终态收尾，重试有终止条件。
+            verify_failures += 1
+            await _append(
+                runtime,
+                sid,
+                VERIFICATION_FAILED_KIND,
+                json.dumps(
+                    {
+                        "reason": verdict.reason,
+                        "evidence": verdict.evidence,
+                        "attempt": verify_failures,
+                        "max_verify_retries": runtime.max_verify_retries,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+            if verify_failures >= runtime.max_verify_retries:
+                return await _finish(
+                    runtime, sid, task_id, resp.text, StopReason.ERROR, iterations, tools_used,
+                    error=f"验证未通过（{verify_failures} 次）：{verdict.reason}",
+                )
+            iterations += 1
+            if iterations >= runtime.max_iterations:
+                return await _budget_finish(runtime, sid, task_id, iterations, tools_used, cancel)
+            continue
     except BaseException:
         # 异常路径：物化中断（恰好一次），不静默吞异常——物化后重新抛出，
         # 让门面知晓任务异常中止。
@@ -349,15 +476,44 @@ async def run_task_loop(
         runtime.session_mgr.clear_running(sid)
 
 
+def _coerce_verdict(value: VerifyVerdict | bool | None) -> VerifyVerdict | None:
+    """归一化 finish_turn 返回值，返回 None 表示「无验证裁决」。
+
+    注入点向后兼容：第一阶段骨架测试里 `finish_turn=lambda ctx: False` 这类
+    旧式 bool 占位不参与新的验证协议（它没有证据、也没有失败原因），因此
+    保持其原有「纯文本即终态」语义，契约升级不破坏既有回归。生产路径由
+    BotRuntime 装配的 TeachingVerifier 返回 VerifyVerdict，一律参与决策。
+    """
+    if isinstance(value, VerifyVerdict):
+        return value
+    return None
+
+
+def _tool_results_of(prefix: list[EntryRow]) -> list[EntryRow]:
+    """从 entry 流水中取出全部 tool_result entry（验证器的证据来源）。"""
+    return [e for e in prefix if e.kind == TOOL_RESULT_KIND]
+
+
+async def _context_messages(runtime: LoopRuntime, sid: str) -> tuple[list[EntryRow], list[dict]]:
+    """重放 → transform_context 注入点 → 投影，返回 (证据流水, OpenAI messages)。"""
+    prefix = await _replay_prefix(runtime.session_mgr, sid)
+    if runtime.transform_context is not None:
+        prefix = runtime.transform_context(prefix)
+    return prefix, project_context(prefix)
+
+
 async def _budget_finish(
     runtime: LoopRuntime, sid: str, task_id: str, iterations: int, tools_used: int, cancel: asyncio.Event
 ) -> TaskResult:
     """预算耗尽：发一次「直接作答勿用工具」，模型仍返回工具调用则丢弃取文本；
-    文本空 → max_iterations。"""
-    prefix = await _replay_prefix(runtime.session_mgr, sid)
+    文本空 → max_iterations。取消优先于预算，且取消后不再发生新的模型调用。
+    """
+    if cancel.is_set():
+        return await _finish(runtime, sid, task_id, "", StopReason.CANCELLED, iterations, tools_used)
+    _prefix, messages = await _context_messages(runtime, sid)
     request = ModelRequest(
         system_prompt=runtime.system_prompt,
-        messages=project_context(prefix),
+        messages=messages,
         tools=[],
         model=runtime.model,
         max_tokens=None,
@@ -436,9 +592,9 @@ async def _drain_steering(runtime: LoopRuntime, task_id: str, sid: str) -> None:
     """no-op：steering 语义已由「FIFO + 重放」间接承担，无需显式 drain。
 
     steering（运行中追加的 user 指令）经 TaskHandle.steer() → session submit
-    落盘为 user entry；loop 每轮开头 `_replay_prefix` 从 storage 重放活跃链，
-    该 entry 自然进入下一轮模型上下文。这里没有单独的「drain」动作要做——
-    不存在「排队中的 steering 等待被消费」这一步。
+    落盘为 user entry，并在门面 publish steering_received；loop 每轮开头
+    `_replay_prefix` 从 storage 重放活跃链，该 entry 自然进入下一轮模型上下文。
+    这里没有单独的「drain」动作要做——不存在「排队中的 steering 等待被消费」。
     """
     return
 
