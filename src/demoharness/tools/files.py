@@ -17,7 +17,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..core.blocking import run_io
-from ..core.git import PATCH_OPTIONS
+from ..core.git import (
+    DIFF_OPTIONS,
+    PATCH_OPTIONS,
+    RAW_OPTIONS,
+    Change,
+    change_fingerprint,
+    raw_changes,
+)
 from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict, task_path
 from ..core.tools import (
     ReplayPolicy,
@@ -299,12 +306,17 @@ class Workspace:
             "--ignore-submodules=all",
         )
 
-    def diff(self, allowed_write_paths: frozenset[str]) -> str:
+    def diff(self, allowed_write_paths: frozenset[str]) -> tuple[str, str | None]:
         if self.task.workspace_kind == "git":
-            tracked = _git(self.root, self.lock_fd, "diff", *PATCH_OPTIONS, "--name-only", "-z",
-                           self.task.base_commit, "--", errors="surrogateescape")
+            tracked = raw_changes(_git(self.root, self.lock_fd, "diff", *RAW_OPTIONS,
+                                       self.task.base_commit, "--", errors="surrogateescape"))
+            staged = _git(self.root, self.lock_fd, "diff", *DIFF_OPTIONS, "--cached", "--name-only", "-z",
+                          self.task.base_commit, "--", errors="surrogateescape")
             added = _git(self.root, self.lock_fd, "ls-files", "--others", "-z", errors="surrogateescape")
-            changed = {path for listing in (tracked, added) for path in listing.split("\0") if path}
+            additions = [path for path in added.split("\0") if path]
+            changed = {change[0] for change in tracked}
+            changed.update(path for path in staged.split("\0") if path)
+            changed.update(additions)
             _verify_write_scope(changed, allowed_write_paths)
             diff = _git(
                 self.root,
@@ -314,21 +326,37 @@ class Workspace:
                 self.task.base_commit,
                 "--",
             )
-            for path in added.split("\0"):
-                if path:
-                    diff += _git(
-                        self.root,
-                        self.lock_fd,
-                        "diff",
-                        "--no-index",
-                        *PATCH_OPTIONS,
-                        "--",
-                        os.devnull,
-                        path,
-                        allowed=(0, 1),
-                    )
-            return diff
-        return _copy_diff(self.baseline, self.root, allowed_write_paths)
+            for path in additions:
+                no_index = ("diff", "--no-index")
+                files = ("--", os.devnull, path)
+                diff += _git(self.root, self.lock_fd, *no_index, *PATCH_OPTIONS, *files, allowed=(0, 1))
+                tracked.extend(raw_changes(_git(
+                    self.root, self.lock_fd, *no_index, *RAW_OPTIONS, *files,
+                    allowed=(0, 1), errors="surrogateescape",
+                )))
+            return diff, self._change_fingerprint(tracked)
+        return _copy_diff(self.baseline, self.root, allowed_write_paths), None
+
+    def _change_fingerprint(self, changes: list[Change]) -> str | None:
+        def resolved() -> Iterator[Change]:
+            for path, before_mode, after_mode, before_id, after_id in changes:
+                if after_mode != "000000" and not after_id.strip("0"):
+                    if after_mode == "120000":
+                        *parents, name = _relative(path)
+                        with self._directory(tuple(parents)) as parent:
+                            data = os.fsencode(os.readlink(name, dir_fd=parent))
+                    else:
+                        data = self.read(path)
+                    sha = hashlib.sha256() if len(before_id) == 64 else hashlib.sha1(usedforsecurity=False)
+                    sha.update(f"blob {len(data)}\0".encode("ascii"))
+                    sha.update(data)
+                    after_id = sha.hexdigest()
+                yield path, before_mode, after_mode, before_id, after_id
+
+        try:
+            return change_fingerprint(resolved())
+        except (OSError, WorkspaceError):
+            return None
 
 
 def _verify_write_scope(changed: set[str], allowed: frozenset[str]) -> None:
@@ -497,7 +525,7 @@ class FileTools:
     async def execute(
         self, action: Action, intent: dict | None, cancel: asyncio.Event
     ) -> ToolResult:
-        return await run_io(self._execute_file, action, intent)
+        return await run_io(self._execute_file, action, intent, record_result_on_cancel=True)
 
     def _execute_file(self, action: Action, intent: dict | None) -> ToolResult:
         name, params = action.call.name, action.call.params

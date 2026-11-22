@@ -9,11 +9,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .core.git import PATCH_OPTIONS, change_fingerprint
+from .core.git import PATCH_OPTIONS, RAW_OPTIONS, change_fingerprint, raw_changes
 
 _GIT_TIMEOUT = 5.0
 _PATH_BYTES = 4_096
 _TEXT_BYTES = 12_288
+_METADATA_BYTES = 1_048_576
 _TRUNCATED = "\n[output truncated]\n"
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
@@ -98,7 +99,11 @@ async def observe(repo: Path, previous_revision: str | None) -> Observation | No
                 attributes=revision,
             )
             evidence = f"Changed paths\n{paths}\nCommitted diff\n{patch}"
-            fingerprint = None if patch.endswith(_TRUNCATED) else change_fingerprint(patch)
+            metadata = await _git(
+                repo, "diff-tree", "--no-commit-id", "-r", *RAW_OPTIONS, previous_revision, revision, "--",
+                max_bytes=_METADATA_BYTES, errors="surrogateescape",
+            )
+            fingerprint = None if metadata.endswith(_TRUNCATED) else change_fingerprint(raw_changes(metadata))
             return Observation(revision, previous_revision, evidence, fingerprint)
 
     paths = await _git(
@@ -144,6 +149,7 @@ async def _git(
     max_bytes: int,
     allow_empty: bool = False,
     attributes: str | None = None,
+    errors: str = "replace",
 ) -> str:
     executable = shutil.which("git")
     if executable is None:
@@ -195,7 +201,7 @@ async def _git(
                 assert process.stdout is not None
                 output = await process.stdout.readexactly(max_bytes + 1)
                 return (
-                    output[:max_bytes].decode("utf-8", "replace")
+                    output[:max_bytes].decode("utf-8", errors)
                     + _TRUNCATED
                 )
             except asyncio.IncompleteReadError as end:
@@ -204,7 +210,7 @@ async def _git(
                     return ""
                 if status != 0:
                     raise ObservationError(f"git {command} exited with status {status}")
-                return end.partial.decode("utf-8", "replace")
+                return end.partial.decode("utf-8", errors)
             finally:
                 if process.returncode is None:
                     try:

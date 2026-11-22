@@ -49,7 +49,11 @@ def test_only_a_typed_scope_change_authorizes_an_extra_path(tmp_path):
         definition = AgentDefinition("demo", project, "scripted", complete)
         async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
             agent = runtime.agent("demo")
-            receipt = await agent.submit("Only update README.md", acceptance=[FileCheck("README.md", equals="ready\n")])
+            receipt = await agent.submit(
+                "Only update README.md and verify NOTES.md still exists",
+                acceptance=[FileCheck("README.md", equals="ready\n"), FileCheck("NOTES.md")],
+                allowed_write_paths=["README.md"],
+            )
             task = await agent.wait(receipt.task_id)
             assert task.state is TaskState.COMPLETED
             assert task.allowed_write_paths == {"README.md"}
@@ -81,7 +85,7 @@ def test_only_a_typed_scope_change_authorizes_an_extra_path(tmp_path):
     asyncio.run(exercise())
 
 
-def test_legacy_direct_task_keeps_its_delivery_and_default_scope(tmp_path):
+def test_legacy_direct_task_keeps_its_delivery_and_requires_new_write_authorization(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     responses = iter([
@@ -101,7 +105,8 @@ def test_legacy_direct_task_keeps_its_delivery_and_default_scope(tmp_path):
         definition = AgentDefinition("demo", project, "scripted", complete)
         async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("demo")
-            receipt = await agent.submit("Write README.md", acceptance=[FileCheck("README.md", equals="ready\n")])
+            receipt = await agent.submit("Write README.md", acceptance=[FileCheck("README.md", equals="ready\n")],
+                                         allowed_write_paths=["README.md"])
             original = await agent.wait(receipt.task_id)
             assert original.state is TaskState.COMPLETED
         db = sqlite3.connect(state / "agent.sqlite3")
@@ -112,7 +117,7 @@ def test_legacy_direct_task_keeps_its_delivery_and_default_scope(tmp_path):
         async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("demo")
             task = agent.task(original.id)
-            assert task.delivery == original.delivery and task.allowed_write_paths == {"README.md"}
+            assert task.delivery == original.delivery and task.allowed_write_paths == set()
             await agent.send("Revoke permission to write README.md", task_id=task.id, allowed_write_paths=[])
             task = await agent.wait(task.id)
             assert task.allowed_write_paths == set()
@@ -125,18 +130,26 @@ def test_legacy_direct_task_keeps_its_delivery_and_default_scope(tmp_path):
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("git", [False, True])
-def test_verification_rejects_an_unexpected_empty_file(tmp_path, git):
+@pytest.mark.parametrize("workspace", ["copy", "git", "staged"])
+def test_verification_rejects_an_unexpected_file(tmp_path, workspace):
     project = tmp_path / "project"
     project.mkdir()
     (project / "README.md").write_text("accepted\n")
-    if git:
-        for args in (("init", "-q"), ("add", "README.md"), ("commit", "-qm", "base")):
+    if workspace != "copy":
+        (project / "NOTES.md").write_text("original\n")
+        for args in (("init", "-q"), ("add", "."), ("commit", "-qm", "base")):
             subprocess.run(["git", "-C", str(project), "-c", "user.name=Demo",
                             "-c", "user.email=demo@example.invalid", *args], check=True)
 
     async def complete(request, cancel):
-        (agent.tasks()[0].workspace / "NOTES.md").touch()
+        root = agent.tasks()[0].workspace
+        notes = root / "NOTES.md"
+        if workspace == "staged":
+            notes.write_text("unauthorized\n")
+            subprocess.run(["git", "-C", str(root), "add", "NOTES.md"], check=True)
+            notes.write_text("original\n")
+        else:
+            notes.write_bytes(b"")
         return reply(text="README still passes")
 
     async def exercise():
@@ -203,7 +216,8 @@ def test_recovery_keeps_a_persisted_plan_update(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("message, expected_scope", [
-    ("只修改 README.md，保留其他文件", {"README.md"}),
+    ("授权写入：README.md | 更新说明，保留其他文件", {"README.md"}),
+    ("Write NOTES.md, but do not change any file yet. First explain your plan.", set()),
     ("Do not modify NOTES.md. Please review README.md.", set()),
     ('Someone wrote "Create NOTES.md" in README.md. Review the reference.', set()),
 ])

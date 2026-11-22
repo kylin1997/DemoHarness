@@ -6,14 +6,15 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import ParamSpec, TypeVar
+from typing import TypeVar
 
-_Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
 _POOL = ThreadPoolExecutor(thread_name_prefix="demoharness-io")
 
 
-async def run_io(operation: Callable[_Params, _Result], /, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+async def run_io(
+    operation: Callable[..., _Result], /, *args: object, record_result_on_cancel: bool = False,
+) -> _Result:
     """Keep in-flight I/O inside its Task's lifetime, even during cancellation."""
     loop = asyncio.get_running_loop()
     ready = asyncio.Event()
@@ -21,7 +22,7 @@ async def run_io(operation: Callable[_Params, _Result], /, *args: _Params.args, 
     try:
         # A pipe also wakes selectors in sandboxes that restrict asyncio's socketpair.
         loop.add_reader(reader, ready.set)
-        work = _POOL.submit(operation, *args, **kwargs)
+        work = _POOL.submit(operation, *args)
         work.add_done_callback(lambda _: os.write(writer, b"\0"))
         try:
             await ready.wait()
@@ -32,7 +33,8 @@ async def run_io(operation: Callable[_Params, _Result], /, *args: _Params.args, 
                     await ready.wait()
                 except asyncio.CancelledError:
                     continue
-            raise
+            if not record_result_on_cancel or work.cancelled():
+                raise
         return work.result()
     finally:
         loop.remove_reader(reader)

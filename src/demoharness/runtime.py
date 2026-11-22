@@ -16,7 +16,6 @@ from uuid import uuid4
 
 from .coordination import CoordinationLog, Message, Notice, Route, route
 from .core.blocking import run_io
-from .core.git import change_fingerprint
 from .core.loop import LoopRole, RoleResult, StreamFn, run_loop
 from .core.storage import HistoryEntry, TaskStore
 from .core.task import (
@@ -392,7 +391,7 @@ class Agent:
         if not goal.strip():
             raise ValueError("A Task goal must be nonempty")
         checks = _checks(acceptance)
-        scope = check_write_paths(checks) if allowed_write_paths is None else write_paths(allowed_write_paths)
+        scope = write_paths(allowed_write_paths) if allowed_write_paths is not None else frozenset()
         receipt = store.submit(self.id, Path(self.definition.project), goal, checks, budget or Budget(),
                                self.definition.capabilities, input_id or uuid4().hex, allowed_write_paths=scope)
         self._runtime._schedule(self.definition, receipt.task_id)
@@ -516,23 +515,14 @@ def _checks(acceptance: Iterable[FileCheck]) -> tuple[FileCheck, ...]:
     return checks
 
 
-_WRITE_DIRECTIVE = re.compile(
-    r"^\s*(?:(?:请\s*)?(?:只\s*)?(?:创建|写入|修改|更新|写)\s*|"
-    r"(?:please\s+)?(?:create|write(?:\s+to)?|update|modify)\s+)"
-    r"(?:`([^`\r\n]+)`|([\w.-]+(?:/[\w.-]+)*))(?=$|[\s,，:：;；。!?！？])",
-    re.IGNORECASE,
-)
-
-
 def _message_write_paths(text: str) -> frozenset[str]:
-    match = _WRITE_DIRECTIVE.match(text)
-    if match is None:
-        return frozenset()
-    quoted, bare = match.groups()
-    if bare and not ("." in bare or "/" in bare or bare.isupper()):
+    first_line = text.lstrip().splitlines()[0]
+    directive, _, goal = first_line.partition(" | ")
+    label, _, path = directive.replace("：", ":", 1).partition(":")
+    if not goal.strip() or label.strip().casefold() not in {"授权写入", "allow write"}:
         return frozenset()
     try:
-        return write_paths((quoted or bare,))
+        return write_paths((path.strip(),))
     except ValueError:
         return frozenset()
 
@@ -554,10 +544,9 @@ def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
         verdict = Verdict.UNVERIFIABLE if any(check.verdict is Verdict.UNVERIFIABLE for check in checks) else Verdict.FAILED
         return RoleResult(verdict, "\n".join(problems), checks)
     try:
-        diff = tools.workspace.diff(task.allowed_write_paths)
+        diff, fingerprint = tools.workspace.diff(task.allowed_write_paths)
     except WriteScopeError as error:
         return RoleResult(Verdict.FAILED, str(error), checks)
     except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
         return RoleResult(Verdict.UNVERIFIABLE, f"Cannot collect the workspace diff: {error}", checks)
-    fingerprint = change_fingerprint(diff) if task.workspace_kind == "git" else None
     return RoleResult(Verdict.PASSED, checks=checks, delivery=Delivery(text, checks, diff, fingerprint))

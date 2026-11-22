@@ -32,7 +32,6 @@ from .task import (
     Task,
     TaskState,
     Verdict,
-    check_write_paths,
 )
 from .tools import ToolCall, ToolResult
 
@@ -428,30 +427,7 @@ class TaskStore:
         if "allowed_write_paths" in columns:
             return
         with self.db:
-            self.db.execute("BEGIN")
             self.db.execute("ALTER TABLE tasks ADD COLUMN allowed_write_paths TEXT NOT NULL DEFAULT '[]'")
-            coordinated = self.db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'coordination'"
-            ).fetchone()
-            rows = self.db.execute("""
-                SELECT tasks.id, tasks.agent_id, tasks.acceptance, entries.data
-                FROM tasks JOIN entries ON entries.id = (
-                    SELECT MIN(id) FROM entries WHERE task_id = tasks.id AND kind = 'input'
-                )
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM entries WHERE task_id = tasks.id AND kind = 'acceptance_revised'
-                )
-            """)
-            for row in rows:
-                source = json.loads(row["data"])
-                if source.get("source") != "user" or (coordinated and self.db.execute(
-                    "SELECT 1 FROM coordination WHERE agent_id = ? AND id = ?",
-                    (row["agent_id"], source["input_id"]),
-                ).fetchone()):
-                    continue
-                paths = sorted(check_write_paths(FileCheck(**check) for check in json.loads(row["acceptance"])))
-                self.db.execute("UPDATE tasks SET allowed_write_paths = ? WHERE id = ?",
-                                (json.dumps(paths, ensure_ascii=False), row["id"]))
 
     @property
     def lock_fd(self) -> int:
@@ -522,7 +498,7 @@ class TaskStore:
             return InputReceipt(input_id, task.id)
         with self.transaction():
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
-            self._entry(task.id, None, "input", input_id=input_id)
+            self._entry(task.id, None, "input", input_id=input_id, source="observation" if observed else "user")
             if not observed and allowed_write_paths is not None and allowed_write_paths != task.allowed_write_paths:
                 paths = sorted(allowed_write_paths)
                 self.db.execute("UPDATE tasks SET allowed_write_paths = ? WHERE id = ?",

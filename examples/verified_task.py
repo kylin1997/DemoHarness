@@ -51,6 +51,7 @@ async def run(root: Path, live: bool):
         agent = runtime.agent("demo")
         receipt = await agent.submit(
             f"创建 report.md，内容必须逐字等于 {CONTENT!r}。",
+            allowed_write_paths=["report.md"],
             acceptance=[FileCheck("report.md", equals=CONTENT)],
         )
         task = await agent.wait(receipt.task_id)

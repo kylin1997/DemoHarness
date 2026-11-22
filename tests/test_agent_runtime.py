@@ -80,6 +80,7 @@ def test_file_task_corrects_failed_acceptance_and_delivers_worktree(repo, tmp_pa
                 ],
                 budget=Budget(model_calls=3, tool_calls=1),
                 input_id="request-1",
+                allowed_write_paths=["nested/out.py"],
             )
             task = await agent.wait(receipt.task_id)
             assert (
@@ -219,6 +220,7 @@ def test_shutdown_waits_for_workspace_write_before_releasing_host_lock(repo, tmp
                 receipt = await agent.submit(
                     "Write output.py", acceptance=[FileCheck("output.py", equals="value = 7\n")],
                     budget=Budget(model_calls=2, tool_calls=1),
+                    allowed_write_paths=["output.py"],
                 )
                 async with asyncio.timeout(5):
                     while not entered.is_set():
@@ -247,6 +249,50 @@ def test_shutdown_waits_for_workspace_write_before_releasing_host_lock(repo, tmp
             assert (task.workspace / "output.py").read_text() == "value = 7\n"
             assert agent.actions(task_id)[0].attempts == 1
             assert agent.runs(task_id)[0].reason is RunReason.PAUSED
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_stop_records_in_flight_write_result(repo, tmp_path, monkeypatch, write_fails):
+    from demoharness import AgentDefinition, AgentRuntime, FileCheck, TaskState
+    from demoharness.tools.files import Workspace
+
+    entered, release = threading.Event(), threading.Event()
+    write = Workspace.write
+
+    def delayed_write(workspace, path, data, before):
+        entered.set()
+        assert release.wait(5)
+        if write_fails:
+            raise OSError("Write failed")
+        write(workspace, path, data, before)
+
+    monkeypatch.setattr(Workspace, "write", delayed_write)
+    script = Script(tools(call("write", "write_file", path="output.py", content="value = 7\n")))
+    definition = AgentDefinition("a", repo, "scripted", script)
+
+    async def scenario():
+        async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
+            agent = runtime.agent("a")
+            receipt = await agent.submit("Write output.py", acceptance=[FileCheck("output.py")],
+                                         allowed_write_paths=["output.py"])
+            async with asyncio.timeout(5):
+                while not entered.is_set():
+                    await asyncio.sleep(0.01)
+                stop = asyncio.create_task(agent.stop(receipt.task_id))
+                try:
+                    while agent.task(receipt.task_id).state is not TaskState.STOPPED:
+                        await asyncio.sleep(0)
+                    assert not stop.done()
+                finally:
+                    release.set()
+                task = await stop
+            (action,) = agent.actions(task.id)
+            assert action.result is not None
+            assert action.result.is_error is write_fails
+            assert (task.workspace / "output.py").exists() is not write_fails
+            assert any(entry.kind == "action_result" for entry in agent.history(task.id))
 
     asyncio.run(scenario())
 
@@ -281,6 +327,7 @@ async def run():
     async with AgentRuntime.open(sys.argv[1], [AgentDefinition("a", sys.argv[2], "scripted", model)], observe=False) as runtime:
         agent = runtime.agent("a")
         receipt = await agent.submit("Write crash.py", acceptance=[FileCheck("crash.py", equals="value = 7\\n")],
+                                     allowed_write_paths=["crash.py"],
                                      budget=Budget(model_calls=2, tool_calls=int(sys.argv[5])))
         Path(sys.argv[3]).write_text(receipt.task_id)
         await agent.wait(receipt.task_id)
@@ -573,6 +620,7 @@ def test_workspace_paths_and_tools_are_enforced_in_plain_project(tmp_path):
             receipt = await a.submit(
                 "Write Python safely",
                 acceptance=[FileCheck("out.py", python_syntax=True, id="syntax")],
+                allowed_write_paths=["out.py"],
             )
             result = await a.wait(receipt.task_id)
             assert result.state is TaskState.COMPLETED, result.detail

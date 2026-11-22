@@ -79,9 +79,11 @@ async def run(root: Path):
     async with AgentRuntime.open(state, [definition], observe_interval=0.05) as runtime:
         agent = runtime.agent("demo")
         await asyncio.wait_for(model.baseline.wait(), 8)
-        a = await agent.submit("工作 A：写 a.txt", acceptance=[FileCheck("a.txt", equals="新要求\n")])
+        a = await agent.submit("工作 A：写 a.txt", acceptance=[FileCheck("a.txt", equals="新要求\n")],
+                               allowed_write_paths=["a.txt"])
         await asyncio.wait_for(model.started_a.wait(), 8)
-        b = await agent.submit("工作 B：写 b.txt", acceptance=[FileCheck("b.txt", equals="独立交付\n")])
+        b = await agent.submit("工作 B：写 b.txt", acceptance=[FileCheck("b.txt", equals="独立交付\n")],
+                               allowed_write_paths=["b.txt"])
         task_b = await asyncio.wait_for(agent.wait(b.task_id), 8)
         assert task_b.state is TaskState.COMPLETED
         print("B 已交付，A 仍在等待模型。", flush=True)

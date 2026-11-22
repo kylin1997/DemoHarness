@@ -181,9 +181,9 @@ def _user_memories(entry: HistoryEntry, source: str) -> Iterator[MemoryDraft]:
 def learn_from_session(
     history: Iterable[HistoryEntry], actions: Iterable[Action], now: float,
 ) -> Iterator[tuple[str, list[MemoryDraft]]]:
-    """Collect memories from trusted inputs, Plan changes, and host checks."""
     by_id = {action.id: action for action in actions}
     passed_checks: dict[tuple[str, str], tuple[str, str] | None] = {}
+    session_checks: dict[str, tuple[str, str]] = {}
     plan = Plan()
     valid_until = now + _EXPERIENCE_LIFETIME
     for entry in history:
@@ -198,10 +198,11 @@ def learn_from_session(
                 check = action.result.details or {}
                 passed = not action.result.is_error and check.get("verdict") == Verdict.PASSED
                 checks = (check,) if passed else ()
-                references = {action.id, action.call.call_id, source}
-                for reference in references:
-                    key = (action.run_id, reference)
-                    passed_checks[key] = (check["id"], source) if passed and key not in passed_checks else None
+                key = (action.run_id, action.call.call_id)
+                proof = (check["id"], source) if passed else None
+                passed_checks[key] = proof if key not in passed_checks else None
+                if proof is not None:
+                    session_checks[action.id] = session_checks[source] = proof
             drafts = [MemoryDraft(
                 "experience", f"check:{check['id']}",
                 f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。",
@@ -218,7 +219,7 @@ def learn_from_session(
                 recipe = _PLAN_CHECK.fullmatch(text)
                 if not text or (decision is None and recipe is None):
                     continue
-                proofs = (passed_checks.get((entry.run_id, ref)) for ref in step.evidence)
+                proofs = (session_checks.get(ref) or passed_checks.get((entry.run_id, ref)) for ref in step.evidence)
                 proof = next((check for check in proofs if check and recipe and recipe[1] == check[0]), None)
                 drafts.append(MemoryDraft(
                     "experience", f"plan:{text}", text,

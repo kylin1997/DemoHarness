@@ -1,27 +1,30 @@
-"""Common Git patch options and delivery evidence."""
+"""Shared Git change metadata for delivery and observation."""
 
 import hashlib
-import re
+from collections.abc import Iterable
 
+DIFF_OPTIONS = ("--no-renames", "--no-relative", "--ignore-submodules=none")
+RAW_OPTIONS = (*DIFF_OPTIONS, "--raw", "-z", "--no-abbrev")
 PATCH_OPTIONS = (
-    "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
-    "--no-color", "--ignore-submodules=none", "--submodule=short",
+    *DIFF_OPTIONS, "--no-ext-diff", "--no-textconv", "--no-color", "--submodule=short",
     "--src-prefix=a/", "--dst-prefix=b/", "--unified=2", "--full-index",
 )
-_FILE_HEADER = re.compile(r"^diff --git ", re.MULTILINE)
-_FULL_INDEX = re.compile(
-    r"^index [0-9a-f]{40}(?:[0-9a-f]{24})?\.\.[0-9a-f]{40}(?:[0-9a-f]{24})?"
-    r"(?: [0-7]{6})?$",
-    re.MULTILINE,
-)
+
+Change = tuple[str, str, str, str, str]
 
 
-def change_fingerprint(patch: str) -> str | None:
-    """Identify a complete set of Git path changes with before and after object IDs."""
-    starts = [match.start() for match in _FILE_HEADER.finditer(patch)]
-    if not starts or starts[0] != 0 or not patch.endswith("\n"):
+def raw_changes(raw: str) -> list[Change]:
+    fields = raw.split("\0")
+    changes = []
+    for header, path in zip(fields[0:-1:2], fields[1:-1:2], strict=True):
+        before_mode, after_mode, before_id, after_id, _ = header.removeprefix(":").split()
+        changes.append((path, before_mode, after_mode, before_id, after_id))
+    return changes
+
+
+def change_fingerprint(changes: Iterable[Change]) -> str | None:
+    records = sorted(changes)
+    if not records:
         return None
-    sections = [patch[start:end] for start, end in zip(starts, starts[1:] + [len(patch)])]
-    if any(not _FULL_INDEX.search(section) for section in sections):
-        return None
-    return hashlib.sha256("\0".join(sorted(sections)).encode()).hexdigest()
+    wire = "\0".join(field for change in records for field in change)
+    return hashlib.sha256(wire.encode("utf-8", "surrogateescape")).hexdigest()

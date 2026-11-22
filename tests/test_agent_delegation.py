@@ -75,6 +75,7 @@ def test_child_reads_own_parent_on_demand_and_returns_evidence(project, tmp_path
             assert (await agent.wait(unrelated.task_id)).state is TaskState.COMPLETED
             receipt = await agent.submit(
                 parent_goal, acceptance=[FileCheck("finding.txt", equals="source is 1")],
+                allowed_write_paths=["finding.txt"],
                 budget=Budget(model_calls=6, tool_calls=5, verifications=2),
             )
             task = await agent.wait(receipt.task_id)

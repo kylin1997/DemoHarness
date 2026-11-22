@@ -2,6 +2,8 @@ import asyncio
 import json
 import subprocess
 
+import pytest
+
 from demoharness import AgentDefinition, AgentRuntime, FileCheck, TaskState
 from demoharness.core.loop import ModelResponse, ModelStop
 
@@ -88,13 +90,15 @@ def test_user_declarations_are_recalled_across_tasks_and_stay_deleted(tmp_path):
     asyncio.run(exercise())
 
 
-def test_plan_decisions_keep_evidence_and_only_verified_decisions_are_recalled(tmp_path):
+@pytest.mark.parametrize("cross_run", [False, True])
+def test_plan_decisions_keep_evidence_and_only_verified_decisions_are_recalled(tmp_path, cross_run):
     project = tmp_path / "project"
     project.mkdir()
     (project / "source.py").write_text("value = 1\n")
     verified = "Run check source syntax"
     claim = "Remove the quarantine after source syntax passes"
     prompts = []
+    check_reference = None if cross_run else "syntax-checked"
 
     async def complete(request, cancel):
         prompt = request.system_prompt
@@ -108,21 +112,30 @@ def test_plan_decisions_keep_evidence_and_only_verified_decisions_are_recalled(t
             steps = json.loads(results["plan"])["steps"]
             if "syntax-checked" not in results:
                 return tool("syntax-checked", "run_check", recipe_id="source syntax")
+            if check_reference is None:
+                return ModelResponse(ModelStop.OK, "Check complete. Review the Plan next.")
             if "verified" not in results:
                 return tool("verified", "mark_step", step_id=steps[0]["id"], state="done",
-                            evidence=["syntax-checked"], expected_revision=revision)
+                            evidence=[check_reference], expected_revision=revision)
             if "claimed" not in results:
                 return tool("claimed", "mark_step", step_id=steps[1]["id"], state="done",
                             evidence=["syntax-checked"], expected_revision=revision)
         return ModelResponse(ModelStop.OK, "Ready for verification")
 
     async def exercise():
+        nonlocal check_reference
         definition = AgentDefinition("helper", project, "scripted", complete)
         checks = [FileCheck("source.py", python_syntax=True, id="source syntax")]
         async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
             agent = runtime.agent("helper")
             receipt = await agent.submit("Create a verification plan", acceptance=checks)
             assert (await agent.wait(receipt.task_id)).state is TaskState.COMPLETED
+            check = next(a for a in agent.actions(receipt.task_id) if a.call.call_id == "syntax-checked")
+            if cross_run:
+                check_reference = check.id
+                await agent.send("Record the passed check in the Plan", task_id=receipt.task_id)
+                assert (await agent.wait(receipt.task_id)).state is TaskState.COMPLETED
+                assert len(agent.runs(receipt.task_id)) == 2
             await until(lambda: any(memory.text == claim for memory in agent.memories()))
             confirmed = next(memory for memory in agent.memories() if memory.text == verified)
             candidate = next(memory for memory in agent.memories() if memory.text == claim)
@@ -133,7 +146,6 @@ def test_plan_decisions_keep_evidence_and_only_verified_decisions_are_recalled(t
             assert candidate.valid_until > candidate.updated_at
             history = agent.history(receipt.task_id)
             plan_revisions = [entry.id for entry in history if entry.kind == "plan_revised"]
-            check = next(a for a in agent.actions(receipt.task_id) if a.call.call_id == "syntax-checked")
             check_entry = next(entry.id for entry in history
                                if entry.kind == "action_result" and entry.data["action_id"] == check.id)
             prefix = f"task:{receipt.task_id}:entry:"

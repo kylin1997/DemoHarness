@@ -30,7 +30,7 @@ uv run pytest -q tests/test_agent_runtime.py -k crash
 uv run demoharness chat local --project /path/to/a/git/repository
 ```
 
-可以输入「创建 `notes.md`，内容为 `hello`，然后核对内容」。用 `/tasks` 取得 Task ID，`/show TASK` 查看 Plan、差异与验收证据，`/history TASK` 看输入和工具记录，`/tell TASK MESSAGE` 补充要求。其余命令见 `/help`。
+可以输入 `授权写入：notes.md | 创建 notes.md，内容为 hello，然后核对内容`。用 `/tasks` 取得 Task ID，`/show TASK` 查看 Plan、差异与验收证据，`/history TASK` 看输入和工具记录，`/tell TASK MESSAGE` 补充要求。要授权额外文件，使用 `/allow TASK PATH...`。其余命令见 `/help`。
 
 默认运行目录是 `~/.demoharness`，可用 `--state-dir` 更改。单 Agent 启动时，从该目录的 `agents/<ID>/` 读取可选的 `SOUL.md` 和 `AGENTS.md`。Git 项目默认观察提交，观察发起的 Task 默认可以读取并运行内置检查。各 Task 的产物留在独立副本里。
 

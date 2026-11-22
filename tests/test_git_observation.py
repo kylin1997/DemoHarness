@@ -212,6 +212,7 @@ def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo,
     (repo / "obsolete.txt").write_text("Keep until reviewed\n")
     _commit(repo, "Initial snapshot")
     observations = asyncio.Queue()
+    delivered_notes = "Updated notes\n" * 1500
     writes = [
         {
             "call_id": "new", "name": "write_file",
@@ -219,7 +220,7 @@ def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo,
         },
         {
             "call_id": "edit", "name": "write_file",
-            "params": {"path": "notes.txt", "content": "Updated notes\n"},
+            "params": {"path": "notes.txt", "content": delivered_notes},
         },
     ]
 
@@ -235,7 +236,7 @@ def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo,
 
     def apply_delivery():
         (repo / "artifact.txt").write_text("Delivered\n")
-        (repo / "notes.txt").write_text("Updated notes\n")
+        (repo / "notes.txt").write_text(delivered_notes)
 
     def undo_delivery():
         (repo / "artifact.txt").unlink()
@@ -252,8 +253,8 @@ def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo,
             agent = runtime.agent("demo")
             receipt = await agent.submit("Create artifact.txt and update notes.txt", acceptance=[
                 FileCheck("artifact.txt", equals="Delivered\n"),
-                FileCheck("notes.txt", equals="Updated notes\n"),
-            ])
+                FileCheck("notes.txt", equals=delivered_notes),
+            ], allowed_write_paths=["artifact.txt", "notes.txt"])
             original = await agent.wait(receipt.task_id)
             assert original.state is TaskState.COMPLETED
 
@@ -265,7 +266,9 @@ def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo,
                 async for notice in agent.updates():
                     if notice.kind == "associated":
                         assert notice.task_id == original.id
-                        assert "artifact.txt" in agent.input(notice.message_id).text
+                        evidence = agent.input(notice.message_id).text
+                        assert "artifact.txt" in evidence
+                        assert "[output truncated]" in evidence
                         break
             assert observations.empty()
             assert agent.task(original.id).state is TaskState.COMPLETED
