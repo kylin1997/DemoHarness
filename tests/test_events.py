@@ -1,4 +1,4 @@
-"""core/events.py 的验收测试（覆盖 docs/design/events-bots.md 事件流 1-5 项）。"""
+"""早期 BotRuntime 的即时事件测试。"""
 
 from __future__ import annotations
 

@@ -1,22 +1,7 @@
-"""DemoHarness 内核 · Task 状态机（core/task.py）。
+"""当前运行时的 Task、Run、Budget、Action 和验收类型。
 
-纯函数库——phase 推导、stop_reason 落点、恢复物化/扫描。**while 循环
-只在 loop.py**（第 4 步），本模块不含循环体；三相 ↔ loop 步骤 ↔ append
-落点的对应表以 docs/design/loop-providers.md「模块收敛」节为唯一权威。
-
-关键设计（见 docs/design/task.md）：
-
-- Task 不落独立 task 表——进度即 entry 流水本身；phase 从叶子 kind 推导
-  （单一事实源，无状态机与存储同步问题）。
-- stop_reason 落点方案 A：终态 assistant entry 的 content 元数据加
-  `stop_reason` 字段；interrupted 物化 entry 本身就承担终态标记。
-- 恢复物化「恰好一次」由 interrupted entry 的存在保证，不靠内存标志——
-  异常路径与重启扫描共用同一函数，幂等可重扫。
-- 后台任务的重启上限（restart_count，第 7、8 步）不在本模块——本模块只
-  物化中断并带出 phase + is_background，自动重排全在扩展层（multi-agent.md）。
-
-running 登记（mark/clear）挂点在 loop，不在本模块——本模块只消费第 1 步
-的 running 状态机（materialize_interrupted 落盘终态后由 loop 负责 clear）。
+Task 代表持续推进的一件事，Run 记录一次执行尝试。TaskStore 保存这些状态。
+本文件也保留早期 SDK 使用的 StopReason 和会话树恢复函数。
 """
 
 from __future__ import annotations

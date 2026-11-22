@@ -1,7 +1,6 @@
 """core/storage.py + core/session.py 的验收测试。
 
-覆盖 docs/design/storage-session.md「测试清单」12 项（每能力对应可观察行为，
-mock 确定性，不依赖网络）。测试用临时文件 SQLite，各开各的库。
+用临时 SQLite 数据库验证早期 BotRuntime 的会话树和重放。
 """
 
 from __future__ import annotations

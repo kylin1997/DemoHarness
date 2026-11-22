@@ -5,7 +5,7 @@
 - write_file —— 写文件（NEVER / SEQUENTIAL）：有副作用，中断后绝不重放。
 - run_command —— 执行命令（NEVER / SEQUENTIAL）：副作用最强，timeout 兜底不 kill。
 
-工具协议见 docs/design/tools.md 与 core/tools.py 的三段式。
+这组工具沿用早期 BotRuntime 的工具协议。
 """
 
 from __future__ import annotations

@@ -1,7 +1,6 @@
 """core/task.py 的验收测试。
 
-覆盖 docs/design/task.md「测试清单」8 项（mock 确定性，临时文件 SQLite）。
-task.py 是纯函数库：phase 推导 / stop_reason 落点 / 恢复物化与扫描。
+验证早期 BotRuntime 的会话树恢复、phase 推导和 stop_reason。
 """
 
 from __future__ import annotations

@@ -1,32 +1,7 @@
-"""DemoHarness 内核 · 会话拥有者（core/session.py）。
+"""当前运行时使用 message_groups 和 compact_groups 组装模型上下文。
 
-会话拥有者：每个会话一个 FIFO，串行化对该会话的一切写入；所有动词
-（append/reset/compact/delete/fork/set_model）都投给目标会话的 FIFO 执行。
-分层原则：本层组装业务语义（什么是 reset、重放怎么走），SQL 一律交给
-storage.py。
-
-核心模型（见 docs/design/storage-session.md）：
-
-- 不再有全局 FIFO。一切操作投给目标会话的 FIFO；fork 走源会话 FIFO
-  （读源必须串行在源的写入之后）；delete 走会话树中每个会话的协调。
-- 跨会话一致性靠 SQLite 单写者 + BEGIN IMMEDIATE：所有写事务天然互斥。
-  fork 的「读源链 + 写新会话」放进一个写事务，源 append 被写锁挡住，
-  快照语义由写锁保证，无需显式锁。
-- 重放是纯内存函数，从 storage.entries() 的 id 序建链，不再额外发 SQL。
-
-running 状态机（本模块定死，登记方是 task.py / loop.py）：
-
-    登记 = 任务输入的 AppendOp 提交成功后（调用方调 mark_running）
-    清除 = Task 终态（stop_reason 落盘）后（调用方调 clear_running）
-    不变式 = running_task(sid) 非空 ⟺ 该会话有任务在输入已落盘、终态未落盘之间
-
-mark_running / clear_running 是公开方法兼测试钩子：测试可直接调模拟忙碌，
-无需依赖 task.py。
-
-第一阶段契约冻结（T01）：NewOp 带齐后台三列（background /
-origin_parent_id / restart_count），CompactOp 的 running 守卫与
-COMPACTION_STARTED publish 点在本模块，SetModelOp 让会话层模型覆盖经
-会话 FIFO 写入（不再由门面直接发 SQL，见架构不变量 1）。
+投影保留工具调用及结果的配对。压缩裁剪模型看到的内容，原始历史仍由 TaskStore 保存。
+SessionManager 和会话树操作用于早期 SDK。
 """
 
 from __future__ import annotations

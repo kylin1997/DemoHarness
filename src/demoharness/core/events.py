@@ -1,23 +1,6 @@
-"""DemoHarness 内核 · 事件流（core/events.py）。
+"""早期 SDK 的即时事件通道。
 
-SDK 调用方的活体通道。关键语义（见 docs/design/events-bots.md）：
-
-- Event 形状唯一权威在此：`{task_id, session_id, type, data}`——session_id
-  是通用归组键（SDK 调用方/日志/测试按会话聚合都需要）。
-- 事件流只做活体推送，不是历史源（架构不变量 6）：断线/慢消费丢帧后，
-  观察面靠下一个事件或主动查 storage 自愈，不补发。
-- 每订阅者独立 asyncio.Queue（maxsize=256），publish 对所有订阅者
-  put_nowait——队列满即丢该订阅者的一帧，publisher 永不 await、扇出不阻塞。
-
-事件类型全集（8 类，唯一权威）见 events-bots.md：
-  task_started / text_delta / tool_call_started / tool_result /
-  phase_changed / task_finished / steering_received / compaction_started
-
-三类此前「只定义常量、无 publish」的事件，其 data 形状以本模块的构造器为
-唯一定义处：text_delta {text, final}、steering_received {text}、
-compaction_started {summary_preview}。publish 点分别是 loop.py（text_delta）、
-runtime.py 的 TaskHandle.steer（steering_received）、session.py 的 _compact
-（compaction_started；压缩触发/切点/摘要生成属 compaction/ 扩展，第 6 步）。
+当前 AgentRuntime 通过 Agent.updates() 读取保存的通知。
 """
 
 from __future__ import annotations

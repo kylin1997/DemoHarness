@@ -1,18 +1,7 @@
-"""DemoHarness 内核 · 存储层（core/storage.py）。
+"""当前运行时使用 TaskStore 将 Task、Run、Session 历史和动作存入 SQLite。
 
-唯一碰 SQL 的地方。分层原则：storage.py 不懂业务语义（不知道什么是
-reset），session.py 不写 SQL——本层只提供 schema、读写原语、事务，
-由 session 层在此之上组装六动词与重放等语义。
-
-关键约束（见 docs/design/storage-session.md）：
-
-- 单连接是正确性前提：进程内对同一 db 文件只允许一个 Storage 实例存活，
-  重复打开抛 :class:`StorageAlreadyOpen`。两个连接 = 两套写事务交错 =
-  id 发号重号 + FIFO 失效。
-- 只增不改：本层不提供任何 UPDATE/DELETE entry 的通道——树只增不改，
-  entry 创建后即不可变（架构不变量 2）。
-- id 应用层发号（meta 表），发号与插入同事务，中途 kill 一起回滚、
-  重启后重发同号无害（该号从未被占用）。
+TaskStore 负责认领 Task、记录工具动作、保存验收结果并恢复中断的 Run。
+本文件的 Storage 则供早期 SDK 保存会话树。
 """
 
 from __future__ import annotations

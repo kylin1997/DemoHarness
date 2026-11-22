@@ -1,6 +1,6 @@
 # DemoHarness 开发规约
 
-DemoHarness 是一个教学用 Agent 工程。能力边界以 [首版能力](docs/specs/agent-feature-scope.md) 为准。结构以 [架构说明](docs/architecture.md) 为准。让新人能从入口跟到唯一的 Task 执行循环，再追踪一个具体能力。
+DemoHarness 是一个教学用 Agent 工程。能力范围、架构和未完成项统一在[系统设计](docs/architecture.md)维护。讨论有冲突时，以最后一次明确确认的决定为准。让新人能从入口跟到唯一的 Task 执行循环，再追踪一个具体能力。
 
 - 使用实际领域术语。Agent 是长期身份，Task 是一件事，Session 保存它的历史，Run 是一次执行尝试。保持状态只有一个写入责任方。
 - 优先用标准库、简单数据结构和一个可复现的教学场景。功能设计要覆盖上下文、工具、约束、验证与纠正。
@@ -14,4 +14,4 @@ uv run pytest -q
 uv run python examples/verified_task.py
 ```
 
-本地协作技能可从 `.agents/workflow.md` 进入，确认后的设计草稿见 `.scratch/agent-redesign/`。这些文件用于开发协作。项目代码和教程按实际可运行的能力更新。`references/` 中的参考项目仅供查阅。
+本地协作技能在 `.agents/skills/`。项目代码和教程按实际可运行的能力更新。`references/` 中的参考项目仅供查阅。

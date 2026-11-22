@@ -1,8 +1,6 @@
 """core/tools.py 的验收测试（协议层，不含具体工具——tool 扩展在 step 3 后续）。
 
-覆盖 docs/design/tools.md「测试清单」中协议层 1-6、9、10 项；教学工具
-（read_file/write_file/run_command）与 workspace 边界属 tools/ 扩展目录，
-在对应步骤单独测试。
+验证早期 BotRuntime 工具调用协议和参数校验。
 """
 
 from __future__ import annotations

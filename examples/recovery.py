@@ -1,4 +1,4 @@
-"""中断恢复示例（examples/recovery.py）。
+"""早期 BotRuntime 的中断恢复示例。当前崩溃测试见 examples/README.md 的「观察崩溃恢复」。
 
 演示「任务未终态时中断 → 恢复扫描物化 interrupted → sessions_with(INTERRUPTED)
 发现 → 显式续跑」。真实模型。先 cp examples/.env.example examples/.env。

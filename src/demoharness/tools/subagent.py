@@ -1,6 +1,6 @@
 """sub-agent 工具（strategies/subagent.py 或 tools/subagent.py）——对齐 multi-agent.md 的 delegate_subagent。
 
-一机制两来源（见 docs/design/multi-agent.md）：用「新会话 + Task」执行，身份来源
+早期 BotRuntime 的委派机制：用「新会话 + Task」执行，身份来源
 是工具参数内联（聚焦 prompt + 受限工具集 + 预算切片）。`final_response` 作为工具结果
 返回父会话；子会话不进父上下文（结果仅作为工具结果回传）。
 

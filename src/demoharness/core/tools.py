@@ -1,26 +1,7 @@
-"""DemoHarness 内核 · 工具调用协议（core/tools.py）。
+"""共享的工具规格、入参校验和工具结果。
 
-内核只定协议，不实现任何具体工具——具体工具在 tools/ 扩展目录（第 3 步
-首批教学工具 read_file/write_file/run_command）。
-
-三层抽象（对齐 pi 的 Tool/ToolCall/AgentToolResult，Python 化，见
-docs/design/tools.md）：
-
-- 声明层 ToolSpec：给模型看的 schema + replay/execution 元数据。
-- 调用载体 ToolCall：call_id 是 tool_call/tool_result entry 的配对键
-  （并发批次结果落盘顺序≠调用顺序，不能靠相邻顺序关联）。
-- 执行层 Tool（Protocol）：Python 侧实现。
-- 结果层 ToolResult：失败编码进 is_error，不抛异常。
-
-三段式执行管线：prepare（查注册表 + 参数校验 + before 钩子）→ execute
-（并发策略：任一 SEQUENTIAL 整批串行，全 PARALLEL 才 gather）→ finalize
-（after 钩子可替换结果）。
-
-参数校验（T01.4 冻结）：手写 JSON Schema 最小子集，标量 + required +
-enum/min/max + `{"type":"array","items":{"type":<scalar>}}` 的元素校验。
-复合判定只针对**实际传入的参数值**，不再遍历 schema 全部属性——否则一个
-声明了复合参数但本次没传的工具也会被整体拒绝（delegate_subagent 的
-tools 数组即此情形）。不引入 jsonschema，保持 httpx 唯一依赖。
+当前执行循环通过 RecoverableTools 控制准备、执行和恢复时的核对。
+ToolRegistry 和批量执行函数服务早期 SDK。
 """
 
 from __future__ import annotations

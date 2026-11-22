@@ -1,4 +1,4 @@
-"""core/loop.py 的验收测试（覆盖 docs/design/loop-providers.md 1-8 项）。
+"""早期 BotRuntime 的工具循环测试。
 
 用 mock stream_fn 驱动完整 ReAct 循环——第 4 步「最小闭环」里程碑。
 mock 模型确定性，不依赖网络。

@@ -1,4 +1,4 @@
-"""DemoHarness 最小使用示例（examples/quickstart.py）。
+"""早期 BotRuntime 的最小使用示例。当前入门从 verified_task.py 开始。
 
 真实模型跑通「build → run → 读结果 → 会话树」的最短路径。
 先 cp examples/.env.example examples/.env 并填 OPENAI_API_KEY。
