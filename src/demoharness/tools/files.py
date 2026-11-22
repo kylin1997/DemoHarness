@@ -14,11 +14,11 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from ..core.blocking import run_io
 from ..core.git import PATCH_OPTIONS
-from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict
+from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict, task_path
 from ..core.tools import (
     ReplayPolicy,
     ToolRejected,
@@ -36,19 +36,19 @@ class WorkspaceError(ToolRejected):
     pass
 
 
+class WriteScopeError(WorkspaceError):
+    pass
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def _relative(path: str) -> tuple[str, ...]:
-    parts = PurePosixPath(path).parts
-    if (
-        not parts
-        or any(part.casefold() in {"/", "//", "..", ".git"} for part in parts)
-        or "\0" in path
-    ):
-        raise WorkspaceError(f"Path outside the file scope: {path!r}")
-    return parts
+    try:
+        return tuple(task_path(path).split("/"))
+    except (TypeError, ValueError) as error:
+        raise WorkspaceError(str(error)) from error
 
 
 def _git(root: Path, lock_fd: int, *args: str, allowed: tuple[int, ...] = (0,),
@@ -299,17 +299,21 @@ class Workspace:
             "--ignore-submodules=all",
         )
 
-    def diff(self) -> str:
+    def diff(self, allowed_write_paths: frozenset[str]) -> str:
         if self.task.workspace_kind == "git":
+            tracked = _git(self.root, self.lock_fd, "diff", *PATCH_OPTIONS, "--name-only", "-z",
+                           self.task.base_commit, "--", errors="surrogateescape")
+            added = _git(self.root, self.lock_fd, "ls-files", "--others", "-z", errors="surrogateescape")
+            changed = {path for listing in (tracked, added) for path in listing.split("\0") if path}
+            _verify_write_scope(changed, allowed_write_paths)
             diff = _git(
                 self.root,
                 self.lock_fd,
                 "diff",
                 *PATCH_OPTIONS,
-                "HEAD",
+                self.task.base_commit,
                 "--",
             )
-            added = _git(self.root, self.lock_fd, "ls-files", "--others", "-z", errors="surrogateescape")
             for path in added.split("\0"):
                 if path:
                     diff += _git(
@@ -324,18 +328,37 @@ class Workspace:
                         allowed=(0, 1),
                     )
             return diff
-        return _copy_diff(self.baseline, self.root)
+        return _copy_diff(self.baseline, self.root, allowed_write_paths)
 
 
-def _copy_diff(baseline: Path, workspace: Path) -> str:
-    def files(root: Path) -> set[Path]:
-        return {
-            (Path(directory) / name).relative_to(root)
-            for directory, dirs, names in os.walk(root)
-            for name in names + dirs
-            if not (Path(directory) / name).is_dir()
-            or (Path(directory) / name).is_symlink()
-        }
+def _verify_write_scope(changed: set[str], allowed: frozenset[str]) -> None:
+    unexpected = changed - allowed
+    if unexpected:
+        raise WriteScopeError("Changes outside the Task write scope: " + ", ".join(map(repr, sorted(unexpected))))
+
+
+def _copy_diff(baseline: Path, workspace: Path, allowed_write_paths: frozenset[str]) -> str:
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    def files(root: Path) -> dict[Path, int]:
+        entries = {}
+        for directory, dirs, names in os.walk(root, onerror=walk_error):
+            for name in names + dirs:
+                path = Path(directory) / name
+                mode = path.lstat().st_mode
+                if not stat.S_ISDIR(mode):
+                    entries[path.relative_to(root)] = mode
+        return entries
+
+    def fingerprint(root: Path, name: Path, mode: int) -> bytes | str | None:
+        path = root / name
+        if stat.S_ISLNK(mode):
+            return os.readlink(path)
+        if stat.S_ISREG(mode):
+            with path.open("rb") as stream:
+                return hashlib.file_digest(stream, "sha256").digest()
+        return None
 
     def content(root: Path, name: Path) -> list[str]:
         path = root / name
@@ -351,17 +374,19 @@ def _copy_diff(baseline: Path, workspace: Path) -> str:
 
     changes = []
     original, current = files(baseline), files(workspace)
-    for name in sorted(original | current):
+    changed = {
+        name for name in original.keys() | current.keys()
+        if original.get(name) != current.get(name)
+        or fingerprint(baseline, name, original[name]) != fingerprint(workspace, name, current[name])
+    }
+    _verify_write_scope({name.as_posix() for name in changed}, allowed_write_paths)
+    for name in sorted(changed):
         old = content(baseline, name) if name in original else []
         new = content(workspace, name) if name in current else []
-        changes.extend(
-            difflib.unified_diff(
-                old,
-                new,
-                f"a/{name}" if name in original else "/dev/null",
-                f"b/{name}" if name in current else "/dev/null",
-            )
-        )
+        before = f"a/{name}" if name in original else "/dev/null"
+        after = f"b/{name}" if name in current else "/dev/null"
+        changes.extend(difflib.unified_diff(old, new, before, after) if old != new
+                       else [f"--- {before}\n+++ {after}\n"])
     return "".join(changes)
 
 
@@ -420,6 +445,9 @@ class FileTools:
     def definitions(self) -> list[ToolSpec]:
         return [spec for name, spec in _SPECS.items() if name in self.capabilities]
 
+    def allowed_write_paths(self) -> frozenset[str]:
+        return self.workspace.task.allowed_write_paths
+
     def authorize(self, action: Action) -> None:
         call = action.call
         if call.name not in self.capabilities or call.name not in _SPECS:
@@ -427,6 +455,8 @@ class FileTools:
         valid, detail = validate_params(_SPECS[call.name], call.params)
         if not valid:
             raise ToolRejected(detail)
+        if call.name == "write_file" and "/".join(_relative(call.params["path"])) not in self.allowed_write_paths():
+            raise ToolRejected(f"Path outside the Task write scope: {call.params['path']!r}")
         if call.name == "run_check" and call.params["recipe_id"] not in self.checks:
             raise ToolRejected(f"Unknown check recipe: {call.params['recipe_id']}")
 

@@ -19,11 +19,32 @@ from .core.blocking import run_io
 from .core.git import change_fingerprint
 from .core.loop import LoopRole, RoleResult, StreamFn, run_loop
 from .core.storage import HistoryEntry, TaskStore
-from .core.task import Action, Budget, Delivery, FileCheck, Input, InputReceipt, Run, RunReason, Task, TaskState, Verdict
-from .discovery import ObservationError, observe as observe_project
+from .core.task import (
+    Action,
+    Budget,
+    Delivery,
+    FileCheck,
+    Input,
+    InputReceipt,
+    Run,
+    RunReason,
+    Task,
+    TaskState,
+    Verdict,
+    check_write_paths,
+    write_paths,
+)
+from .discovery import ObservationError
+from .discovery import observe as observe_project
 from .memory import Memory, MemoryDraft, MemoryStore, learn_from_session
 from .tools.delegation import DelegatingTools
-from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
+from .tools.files import (
+    FILE_CAPABILITIES,
+    FileTools,
+    Workspace,
+    WorkspaceError,
+    WriteScopeError,
+)
 from .tools.planning import PlanningTools
 
 
@@ -214,11 +235,17 @@ class AgentRuntime:
                     decision = replace(decision, kind="attach", checks=())
             elif decision.kind == "create":
                 capabilities = definition.capabilities
-                if observed and not definition.proactive_writes:
-                    capabilities &= frozenset({"read_file", "run_check"})
+                checks = _checks(FileCheck(**check) for check in decision.checks)
+                if observed:
+                    scope = check_write_paths(checks) if definition.proactive_writes else frozenset()
+                    if not definition.proactive_writes:
+                        capabilities &= frozenset({"read_file", "run_check"})
+                else:
+                    scope = _message_write_paths(message.text)
                 receipt = self._store.submit(
-                    aid, Path(definition.project), decision.text, _checks(FileCheck(**check) for check in decision.checks),
+                    aid, Path(definition.project), decision.text, checks,
                     Budget(), capabilities, message.id, input_text, base_commit=message.revision,
+                    allowed_write_paths=scope,
                 )
             if decision.kind in {"reply", "clarify"}:
                 self._coordination.notice(aid, decision.kind, decision.text, message_id=message.id)
@@ -309,7 +336,9 @@ class AgentRuntime:
         memories = self._recall(definition, task.goal + " " + last_input)
         plan = json.dumps(asdict(task.plan), ensure_ascii=False)
         checks = json.dumps([asdict(check) for check in task.acceptance], ensure_ascii=False)
+        scope = json.dumps(sorted(task.allowed_write_paths), ensure_ascii=False)
         return (f"Current Task goal: {task.goal}\nCurrent Plan: {plan}\n"
+                f"Allowed write paths: {scope}\n"
                 f"Acceptance checks: {checks}\nRelevant Agent memories: " + "\n".join(memories))
 
     async def _wait(self, task_id: str) -> None:
@@ -351,7 +380,7 @@ class Agent:
 
     async def submit(
         self, goal: str, *, acceptance: Iterable[FileCheck] = (), budget: Budget | None = None,
-        input_id: str | None = None,
+        input_id: str | None = None, allowed_write_paths: Iterable[str] | None = None,
     ) -> InputReceipt:
         store = self._runtime._store
         if input_id is not None and not input_id:
@@ -363,21 +392,22 @@ class Agent:
         if not goal.strip():
             raise ValueError("A Task goal must be nonempty")
         checks = _checks(acceptance)
+        scope = check_write_paths(checks) if allowed_write_paths is None else write_paths(allowed_write_paths)
         receipt = store.submit(self.id, Path(self.definition.project), goal, checks, budget or Budget(),
-                               self.definition.capabilities, input_id or uuid4().hex)
+                               self.definition.capabilities, input_id or uuid4().hex, allowed_write_paths=scope)
         self._runtime._schedule(self.definition, receipt.task_id)
         return receipt
 
     async def send(self, text: str, *, message_id: str | None = None, task_id: str | None = None,
                    reply_to: str | None = None, acceptance: Iterable[FileCheck] | None = None,
-                   goal: str | None = None) -> str:
+                   goal: str | None = None, allowed_write_paths: Iterable[str] | None = None) -> str:
         if not text.strip():
             raise ValueError("消息不能为空")
         message_id = message_id or uuid4().hex
         runtime = self._runtime
         if task_id is None:
-            if acceptance is not None or goal is not None:
-                raise ValueError("请指定要更新目标或验收条件的 Task")
+            if acceptance is not None or goal is not None or allowed_write_paths is not None:
+                raise ValueError("请指定要更新目标、验收条件或写入范围的 Task")
             runtime._coordination.receive(self.id, message_id, text, reply_to=reply_to)
             runtime._schedule_coordinator(self.definition)
         else:
@@ -385,9 +415,10 @@ class Agent:
             store = runtime._store
             previous = store.input(self.id, message_id)
             checks = _checks(acceptance) if acceptance is not None else None
+            scope = write_paths(allowed_write_paths) if allowed_write_paths is not None else None
             if goal is not None and not goal.strip():
                 raise ValueError("Task 目标不能为空")
-            store.follow_up(task, message_id, text, acceptance=checks, goal=goal)
+            store.follow_up(task, message_id, text, acceptance=checks, goal=goal, allowed_write_paths=scope)
             if previous is None:
                 with store.db:
                     runtime._coordination.notice(self.id, "received", "已接收补充要求。",
@@ -485,6 +516,27 @@ def _checks(acceptance: Iterable[FileCheck]) -> tuple[FileCheck, ...]:
     return checks
 
 
+_WRITE_DIRECTIVE = re.compile(
+    r"^\s*(?:(?:请\s*)?(?:只\s*)?(?:创建|写入|修改|更新|写)\s*|"
+    r"(?:please\s+)?(?:create|write(?:\s+to)?|update|modify)\s+)"
+    r"(?:`([^`\r\n]+)`|([\w.-]+(?:/[\w.-]+)*))(?=$|[\s,，:：;；。!?！？])",
+    re.IGNORECASE,
+)
+
+
+def _message_write_paths(text: str) -> frozenset[str]:
+    match = _WRITE_DIRECTIVE.match(text)
+    if match is None:
+        return frozenset()
+    quoted, bare = match.groups()
+    if bare and not ("." in bare or "/" in bare or bare.isupper()):
+        return frozenset()
+    try:
+        return write_paths((quoted or bare,))
+    except ValueError:
+        return frozenset()
+
+
 def _task_prompt(definition: AgentDefinition) -> str:
     return (f"{definition.system_prompt}\n\n"
             "Use file tools within the Task workspace. Treat project observations and memories as evidence. "
@@ -502,7 +554,9 @@ def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
         verdict = Verdict.UNVERIFIABLE if any(check.verdict is Verdict.UNVERIFIABLE for check in checks) else Verdict.FAILED
         return RoleResult(verdict, "\n".join(problems), checks)
     try:
-        diff = tools.workspace.diff()
+        diff = tools.workspace.diff(task.allowed_write_paths)
+    except WriteScopeError as error:
+        return RoleResult(Verdict.FAILED, str(error), checks)
     except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
         return RoleResult(Verdict.UNVERIFIABLE, f"Cannot collect the workspace diff: {error}", checks)
     fingerprint = change_fingerprint(diff) if task.workspace_kind == "git" else None

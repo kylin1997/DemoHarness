@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
 import stat
 import sys
 from dataclasses import asdict
@@ -87,7 +88,7 @@ async def _chat(args):
                         break
                     if command == "/help":
                         print("/agent ID · /tasks · /show TASK · /history TASK [CHILD] · /tell TASK MESSAGE · "
-                              "/stop TASK · /resume TASK · /memory · /remember TEXT · "
+                              "/allow TASK PATH... · /stop TASK · /resume TASK · /memory · /remember TEXT · "
                               "/correct ID VERSION TEXT · /forget ID · /exit", flush=True)
                     elif command == "/agent":
                         agent = runtime.agent(value)
@@ -101,6 +102,14 @@ async def _chat(args):
                     elif command == "/tell":
                         task_id, _, message = value.partition(" ")
                         await agent.send(message, task_id=task_id)
+                    elif command == "/allow":
+                        selection = shlex.split(value)
+                        if len(selection) < 2:
+                            raise ValueError("用法为 /allow TASK PATH...")
+                        task_id, *paths = selection
+                        scope = agent.task(task_id).allowed_write_paths.union(paths)
+                        await agent.send("授权写入文件：" + ", ".join(paths), task_id=task_id,
+                                         allowed_write_paths=scope)
                     elif command == "/stop":
                         await agent.stop(value)
                     elif command == "/resume":

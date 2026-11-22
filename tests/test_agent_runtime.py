@@ -155,7 +155,7 @@ def test_blocked_workspace_io_allows_other_tasks_and_input(repo, tmp_path, monke
         updated_check = FileCheck("source.py", contains="source = 1", id="follow-up")
         async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
             agent = runtime.agent("a")
-            slow = await agent.submit("Slow", acceptance=[check])
+            slow = await agent.submit("Slow", acceptance=[check], allowed_write_paths=["source.py", "obsolete.py"])
             slow_workspace = agent.task(slow.task_id).workspace
             try:
                 async with asyncio.timeout(5):
@@ -424,6 +424,7 @@ def test_budget_blocks_second_tool_then_resumes_same_call_batch(repo, tmp_path):
             receipt = await agent.submit(
                 "Write one.py and two.py",
                 acceptance=[FileCheck("two.py")],
+                allowed_write_paths=["one.py", "two.py"],
                 budget=Budget(model_calls=2, tool_calls=1),
             )
             task = await agent.wait(receipt.task_id)

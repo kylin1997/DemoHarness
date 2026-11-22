@@ -27,8 +27,8 @@ def test_new_work_and_follow_up_progress_while_another_task_is_waiting(tmp_path)
             nonlocal stale_call
             if "你负责判断消息属于哪件事" in request.system_prompt:
                 message = json.loads(request.messages[-1]["content"])["text"]
-                kind = "create" if message in {"第一件事", "第二件事"} else "clarify"
-                result = {"kind": kind, "text": message if kind == "create" else "你指哪件事？"}
+                kind = "create" if message.startswith("创建 result.txt") else "clarify"
+                result = {"kind": kind, "text": message.split("，", 1)[-1] if kind == "create" else "你指哪件事？"}
                 if kind == "create":
                     result["checks"] = [{"path": "result.txt"}]
                 return text_response(json.dumps(result, ensure_ascii=False))
@@ -44,7 +44,7 @@ def test_new_work_and_follow_up_progress_while_another_task_is_waiting(tmp_path)
                     return text_response("第一件事已更新")
                 if any(m.get("tool_call_id") == "plan" for m in results):
                     return tool_response("new", "write_file", path="result.txt", content="A updated")
-                return tool_response("plan", "set_plan", steps=["写入新内容"], reason="用户补充要求")
+                return tool_response("plan", "set_plan", steps=["写入新内容"], reason="用户补充要求", expected_revision=1)
             if stale_call:
                 return text_response("模型没有看到新内容")
             stale_call = True
@@ -55,11 +55,11 @@ def test_new_work_and_follow_up_progress_while_another_task_is_waiting(tmp_path)
         async with AgentRuntime.open(tmp_path / "state", [AgentDefinition("demo", project, "scripted", complete)],
                                      observe=False) as runtime:
             agent = runtime.agent("demo")
-            await agent.send("第一件事", message_id="a")
+            await agent.send("创建 result.txt，第一件事", message_id="a")
             await asyncio.wait_for(slow.wait(), timeout=5)
             task_a = next(task for task in agent.tasks() if task.goal == "第一件事")
-            await agent.send("第二件事", message_id="b")
-            await agent.send("第二件事", message_id="b")
+            await agent.send("创建 result.txt，第二件事", message_id="b")
+            await agent.send("创建 result.txt，第二件事", message_id="b")
             await asyncio.wait_for(written.wait(), timeout=5)
             task_b = next(task for task in agent.tasks() if task.goal == "第二件事")
             assert (await agent.wait(task_b.id)).state is TaskState.COMPLETED

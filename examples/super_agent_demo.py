@@ -51,7 +51,8 @@ class DemoModel:
                 await self.release_a.wait()
                 return tool("write_file", path="a.txt", content="旧要求\n")
             if "set_plan" not in results:
-                return tool("set_plan", reason="用户补充了新要求", steps=["核对补充", "写入并验证 a.txt"])
+                return tool("set_plan", expected_revision=1, reason="用户补充了新要求",
+                            steps=["核对补充", "写入并验证 a.txt"])
             if "delegate" not in results:
                 return tool("delegate", prompt="核对父 Session 的新要求")
             if "write_file" not in results:

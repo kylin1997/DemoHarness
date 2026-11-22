@@ -12,6 +12,7 @@ class StepState(StrEnum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    RETIRED = "retired"
 
 
 @dataclass(frozen=True)
@@ -33,15 +34,19 @@ class Plan:
             raise ValueError("计划需要 1 至 20 个非空步骤，每步不超过 500 字")
         if len(set(texts)) != len(texts):
             raise ValueError("计划步骤不能重复")
-        known = {step.action: step for step in self.steps}
+        known = {step.action: step for step in self.steps if step.state is not StepState.RETIRED}
         steps = tuple(known[text] if text in known else Step(uuid4().hex[:12], text)
                       for text in texts)
+        steps += tuple(replace(step, state=StepState.RETIRED) for step in self.steps
+                       if step.state is StepState.RETIRED or step.action not in texts)
         return Plan(self.revision + 1, steps) if steps != self.steps else self
 
     def mark(self, step_id: str, state: StepState, evidence: tuple[str, ...]) -> Plan:
         for index, step in enumerate(self.steps):
             if step.id == step_id:
-                updated = replace(step, state=state, evidence=evidence)
+                if step.state is StepState.RETIRED or state is StepState.RETIRED:
+                    raise ValueError("退役步骤只能通过修订计划产生，之后不能更新")
+                updated = replace(step, state=state, evidence=tuple(dict.fromkeys((*step.evidence, *evidence))))
                 if updated == step:
                     return self
                 steps = (*self.steps[:index], updated, *self.steps[index + 1:])

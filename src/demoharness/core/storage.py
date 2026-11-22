@@ -10,7 +10,7 @@ import fcntl
 import json
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,6 +32,7 @@ from .task import (
     Task,
     TaskState,
     Verdict,
+    check_write_paths,
 )
 from .tools import ToolCall, ToolResult
 
@@ -312,6 +313,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     base_commit TEXT,
     workspace_ready INTEGER NOT NULL DEFAULT 0,
     capabilities TEXT NOT NULL,
+    allowed_write_paths TEXT NOT NULL DEFAULT '[]',
     state TEXT NOT NULL,
     reason TEXT,
     detail TEXT,
@@ -397,6 +399,7 @@ class TaskStore:
             self.db.execute("PRAGMA journal_mode = WAL")
             self.db.executescript(_TASK_SCHEMA)
             self._migrate_run_streams()
+            self._migrate_write_scope()
         except BaseException:
             if hasattr(self, "db"):
                 self.db.close()
@@ -419,6 +422,36 @@ class TaskStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_active_delegation_run ON runs(delegation_id) "
                 "WHERE ended_at IS NULL AND delegation_id IS NOT NULL"
             )
+
+    def _migrate_write_scope(self) -> None:
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        if "allowed_write_paths" in columns:
+            return
+        with self.db:
+            self.db.execute("BEGIN")
+            self.db.execute("ALTER TABLE tasks ADD COLUMN allowed_write_paths TEXT NOT NULL DEFAULT '[]'")
+            coordinated = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'coordination'"
+            ).fetchone()
+            rows = self.db.execute("""
+                SELECT tasks.id, tasks.agent_id, tasks.acceptance, entries.data
+                FROM tasks JOIN entries ON entries.id = (
+                    SELECT MIN(id) FROM entries WHERE task_id = tasks.id AND kind = 'input'
+                )
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM entries WHERE task_id = tasks.id AND kind = 'acceptance_revised'
+                )
+            """)
+            for row in rows:
+                source = json.loads(row["data"])
+                if source.get("source") != "user" or (coordinated and self.db.execute(
+                    "SELECT 1 FROM coordination WHERE agent_id = ? AND id = ?",
+                    (row["agent_id"], source["input_id"]),
+                ).fetchone()):
+                    continue
+                paths = sorted(check_write_paths(FileCheck(**check) for check in json.loads(row["acceptance"])))
+                self.db.execute("UPDATE tasks SET allowed_write_paths = ? WHERE id = ?",
+                                (json.dumps(paths, ensure_ascii=False), row["id"]))
 
     @property
     def lock_fd(self) -> int:
@@ -451,7 +484,7 @@ class TaskStore:
     def submit(
         self, agent_id: str, project: Path, goal: str, acceptance: tuple[FileCheck, ...],
         budget: Budget, capabilities: frozenset[str], input_id: str, input_text: str | None = None,
-        *, base_commit: str | None = None,
+        *, base_commit: str | None = None, allowed_write_paths: frozenset[str] = frozenset(),
     ) -> InputReceipt:
         previous = self.input(agent_id, input_id)
         if previous:
@@ -460,16 +493,18 @@ class TaskStore:
         with self.transaction():
             self.db.execute(
                 """INSERT INTO tasks (
-                    id, agent_id, project, goal, acceptance, workspace, capabilities, state,
+                    id, agent_id, project, goal, acceptance, workspace, capabilities, allowed_write_paths, state,
                     model_calls, tool_calls, verifications, compactions
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
                 (task_id, agent_id, str(project), goal, json.dumps([asdict(check) for check in acceptance]),
                  str(self.root / "agents" / agent_id / "workspaces" / task_id), json.dumps(sorted(capabilities)),
+                 json.dumps(sorted(allowed_write_paths), ensure_ascii=False),
                  budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions),
             )
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)",
                             (input_id, agent_id, task_id, goal if input_text is None else input_text))
-            self._entry(task_id, None, "input", input_id=input_id, source="observation" if base_commit else "user")
+            self._entry(task_id, None, "input", input_id=input_id, source="observation" if base_commit else "user",
+                        allowed_write_paths=sorted(allowed_write_paths))
             self.db.execute("INSERT INTO task_plans VALUES (?, ?)",
                 (task_id, json.dumps(asdict(Plan().revise([goal.strip()[:500]])), ensure_ascii=False)))
             if base_commit:
@@ -478,7 +513,8 @@ class TaskStore:
         return InputReceipt(input_id, task_id)
 
     def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False,
-                  acceptance: tuple[FileCheck, ...] | None = None, goal: str | None = None) -> InputReceipt:
+                  acceptance: tuple[FileCheck, ...] | None = None, goal: str | None = None,
+                  allowed_write_paths: frozenset[str] | None = None) -> InputReceipt:
         previous = self.input(task.agent_id, input_id)
         if previous:
             if previous.task_id != task.id:
@@ -487,6 +523,12 @@ class TaskStore:
         with self.transaction():
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
             self._entry(task.id, None, "input", input_id=input_id)
+            if not observed and allowed_write_paths is not None and allowed_write_paths != task.allowed_write_paths:
+                paths = sorted(allowed_write_paths)
+                self.db.execute("UPDATE tasks SET allowed_write_paths = ? WHERE id = ?",
+                                (json.dumps(paths, ensure_ascii=False), task.id))
+                self._entry(task.id, None, "write_scope_revised", input_id=input_id,
+                            previous_paths=sorted(task.allowed_write_paths), allowed_write_paths=paths)
             if goal is not None and not observed:
                 self.db.execute("UPDATE tasks SET goal = ? WHERE id = ?", (goal, task.id))
                 self._entry(task.id, None, "goal_revised", input_id=input_id, goal=goal)
@@ -524,12 +566,33 @@ class TaskStore:
         return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM entries WHERE task_id = ? AND run_id IS NULL AND kind = 'input'",
                                (task_id,)).fetchone()[0]
 
-    def set_plan(self, run: Run, plan: Plan, reason: str, action_id: str) -> None:
-        plan_data = asdict(plan)
+    def _plan(self, task_id: str) -> Plan:
+        row = self.db.execute("SELECT plan FROM task_plans WHERE task_id = ?", (task_id,)).fetchone()
+        return Plan.from_record(json.loads(row[0])) if row else Plan()
+
+    def plan_for_action(self, task_id: str, action_id: str) -> Plan | None:
+        row = self.db.execute("""
+            SELECT data FROM entries WHERE task_id = ? AND kind = 'plan_revised'
+            AND json_extract(data, '$.action_id') = ?
+        """, (task_id, action_id)).fetchone()
+        return Plan.from_record(json.loads(row[0])["plan"]) if row else None
+
+    def set_plan(self, run: Run, expected_revision: int, update: Callable[[Plan], Plan],
+                 reason: str, action_id: str) -> Plan:
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            current = self._plan(run.task_id)
+            if expected_revision != current.revision:
+                raise ValueError(f"Plan revision {expected_revision} is stale. Current revision is {current.revision}")
+            plan = update(current)
+            if plan == current:
+                return current
+            plan_data = asdict(plan)
             self.db.execute("""INSERT INTO task_plans VALUES (?, ?) ON CONFLICT(task_id)
                 DO UPDATE SET plan = excluded.plan""", (run.task_id, json.dumps(plan_data, ensure_ascii=False)))
-            self._entry(run.task_id, run.id, "plan_revised", plan=plan_data, reason=reason, action_id=action_id)
+            self._entry(run.task_id, run.id, "plan_revised", plan=plan_data, reason=reason,
+                        expected_revision=expected_revision, action_id=action_id)
+        return plan
 
     def input(self, agent_id: str, input_id: str) -> Input | None:
         row = self.db.execute("SELECT * FROM inputs WHERE agent_id = ? AND id = ?", (agent_id, input_id)).fetchone()
@@ -543,7 +606,6 @@ class TaskStore:
         if delivery:
             checks = tuple(_check_evidence(check) for check in delivery["checks"])
             delivery = Delivery(delivery["text"], checks, delivery["diff"], delivery.get("change_fingerprint"))
-        plan_row = self.db.execute("SELECT plan FROM task_plans WHERE task_id = ?", (task_id,)).fetchone()
         return Task(
             id=row["id"], agent_id=row["agent_id"], project=Path(row["project"]), goal=row["goal"],
             acceptance=tuple(FileCheck(**check) for check in json.loads(row["acceptance"])),
@@ -554,7 +616,8 @@ class TaskStore:
             workspace_ready=bool(row["workspace_ready"]),
             reason=RunReason(row["reason"]) if row["reason"] else None,
             detail=row["detail"], delivery=delivery,
-            plan=Plan.from_record(json.loads(plan_row[0])) if plan_row else Plan(),
+            plan=self._plan(task_id),
+            allowed_write_paths=frozenset(json.loads(row["allowed_write_paths"])),
         )
 
     def queued(self, agent_id: str) -> list[str]:

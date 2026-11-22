@@ -101,18 +101,19 @@ def test_plan_decisions_keep_evidence_and_only_verified_decisions_are_recalled(t
         prompts.append(prompt)
         results = {m.get("tool_call_id"): m["content"] for m in request.messages if m["role"] == "tool"}
         if "Create a verification plan" in prompt:
+            revision = json.loads(prompt.split("Current Plan: ", 1)[1].splitlines()[0])["revision"]
             if "plan" not in results:
                 return tool("plan", "set_plan", steps=[verified, f"Decision: {claim}", "Read the file"],
-                            reason="Select a check and record a possible follow-up")
+                            reason="Select a check and record a possible follow-up", expected_revision=revision)
             steps = json.loads(results["plan"])["steps"]
             if "syntax-checked" not in results:
                 return tool("syntax-checked", "run_check", recipe_id="source syntax")
             if "verified" not in results:
                 return tool("verified", "mark_step", step_id=steps[0]["id"], state="done",
-                            evidence=["syntax-checked"])
+                            evidence=["syntax-checked"], expected_revision=revision)
             if "claimed" not in results:
                 return tool("claimed", "mark_step", step_id=steps[1]["id"], state="done",
-                            evidence=["syntax-checked"])
+                            evidence=["syntax-checked"], expected_revision=revision)
         return ModelResponse(ModelStop.OK, "Ready for verification")
 
     async def exercise():

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from .plan import Plan
@@ -359,6 +360,31 @@ class FileCheck:
             object.__setattr__(self, "id", self.path)
 
 
+def task_path(path: str) -> str:
+    if not isinstance(path, str):
+        raise TypeError("A Task path must be a string")
+    parts = PurePosixPath(path).parts
+    if not parts or any(part.casefold() in {"/", "//", "..", ".git"} for part in parts) or "\0" in path:
+        raise ValueError(f"Path outside the file scope: {path!r}")
+    return "/".join(parts)
+
+
+def write_paths(paths: Iterable[str]) -> frozenset[str]:
+    if isinstance(paths, (str, bytes)):
+        raise TypeError("Write scope must be a collection of file paths")
+    return frozenset(task_path(path) for path in paths)
+
+
+def check_write_paths(checks: Iterable[FileCheck]) -> frozenset[str]:
+    paths = set()
+    for check in checks:
+        try:
+            paths.add(task_path(check.path))
+        except (TypeError, ValueError):
+            continue
+    return frozenset(paths)
+
+
 @dataclass(frozen=True)
 class CheckEvidence:
     id: str
@@ -395,6 +421,7 @@ class Task:
     detail: str | None = None
     delivery: Delivery | None = None
     plan: Plan = field(default_factory=Plan)
+    allowed_write_paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
