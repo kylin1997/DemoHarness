@@ -30,16 +30,19 @@ class DemoModel:
         prompt = request.system_prompt
         results = {m.get("tool_call_id") for m in request.messages if m["role"] == "tool"}
         if "你负责判断消息属于哪件事" in prompt:
-            observation = json.loads(request.messages[-1]["content"])["text"]
+            context = json.loads(request.messages[-1]["content"])
+            observation = context["text"]
             self.baseline.set()
             decision = {"kind": "skip"}
             if "TODO" in observation:
+                assert any("a.txt" in memory for memory in context["memories"])
                 decision = {"kind": "create", "text": "检查新提交中的待办", "work_key": "notes:todo",
                             "checks": [{"path": "notes.md", "contains": "TODO"}]}
             return ModelResponse(ModelStop.OK, json.dumps(decision, ensure_ascii=False))
         if "delegated request" in prompt:
             if "read_parent_history" not in results:
-                return tool("read_parent_history", limit=4)
+                return tool("read_parent_history", limit=20)
+            assert any("改写：a.txt 使用新要求" in m["content"] for m in request.messages if m["role"] == "tool")
             return ModelResponse(ModelStop.OK, "已从父 Session 核对补充要求。")
         if "工作 A" in prompt:
             updates = "\n".join(m["content"] for m in request.messages if m["role"] == "user")
@@ -88,13 +91,14 @@ async def run(root: Path):
         delegated = next(action for action in agent.actions(task_a.id) if action.call.name == "delegate")
         assert not delegated.result.is_error
         print(f"A 修订了 Plan 并验收。子 Agent：{delegated.result.details['summary']}", flush=True)
-        await until(lambda: any("a.txt" in m.text for m in agent.memories()))
+        await until(lambda: any("a.txt" in m.text and any(source.startswith(f"task:{task_a.id}:") for source in m.sources)
+                                for m in agent.memories()))
         print("Agent 记忆保存了 a.txt 的检查及来源。", flush=True)
-        commit(project, "TODO: 核对项目笔记\n")
+        commit(project, "TODO: 核对 a.txt 的验收方法\n")
         await until(lambda: len(agent.tasks()) == 3)
         discovered = next(t for t in agent.tasks() if t.id not in {task_a.id, task_b.id})
         assert (await asyncio.wait_for(agent.wait(discovered.id), 8)).state is TaskState.COMPLETED
-        print(f"新提交触发了 Task：{discovered.goal}", flush=True)
+        print(f"新提交触发了 Task，并召回了 a.txt 的验收记忆：{discovered.goal}", flush=True)
     async with AgentRuntime.open(state, [definition], observe_interval=0.05) as runtime:
         agent = runtime.agent("demo")
         assert agent.task(task_a.id).session_id == task_a.session_id
