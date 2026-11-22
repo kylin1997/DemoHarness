@@ -76,3 +76,31 @@ def test_new_work_and_follow_up_progress_while_another_task_is_waiting(tmp_path)
                            for action in agent.actions(task_a.id))
 
     asyncio.run(exercise())
+
+
+def test_confirmed_acceptance_resumes_the_same_waiting_task(tmp_path):
+    from demoharness import FileCheck
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "result.txt").write_text("existing evidence")
+
+    async def complete(request, cancel):
+        return text_response("检查已完成。")
+
+    async def exercise():
+        definition = AgentDefinition("demo", project, "scripted", complete)
+        async with AgentRuntime.open(tmp_path / "state", [definition]) as runtime:
+            agent = runtime.agent("demo")
+            receipt = await agent.submit("复核已有结果")
+            waiting = await agent.wait(receipt.task_id)
+            assert waiting.state is TaskState.WAITING
+            await agent.send("按现有文件内容验收", task_id=waiting.id,
+                             acceptance=[FileCheck("result.txt", equals="existing evidence")], goal="复核结果内容")
+            delivered = await agent.wait(waiting.id)
+            assert delivered.state is TaskState.COMPLETED
+            assert delivered.session_id == waiting.session_id
+            assert delivered.goal == "复核结果内容"
+            assert delivered.delivery.checks[0].path == "result.txt"
+
+    asyncio.run(exercise())

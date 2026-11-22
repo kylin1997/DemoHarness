@@ -86,7 +86,7 @@ async def _chat(args):
                     if command == "/exit":
                         break
                     if command == "/help":
-                        print("/agent ID · /tasks · /show TASK · /history TASK · /tell TASK MESSAGE · "
+                        print("/agent ID · /tasks · /show TASK · /history TASK [CHILD] · /tell TASK MESSAGE · "
                               "/stop TASK · /resume TASK · /memory · /remember TEXT · "
                               "/correct ID VERSION TEXT · /forget ID · /exit", flush=True)
                     elif command == "/agent":
@@ -96,7 +96,8 @@ async def _chat(args):
                     elif command == "/show":
                         _show(asdict(agent.task(value)))
                     elif command == "/history":
-                        _show([asdict(entry) for entry in agent.history(value)])
+                        task_id, _, child_id = value.partition(" ")
+                        _show([asdict(entry) for entry in agent.history(task_id, delegation_id=child_id or None)])
                     elif command == "/tell":
                         task_id, _, message = value.partition(" ")
                         await agent.send(message, task_id=task_id)

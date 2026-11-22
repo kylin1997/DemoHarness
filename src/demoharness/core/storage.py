@@ -450,6 +450,7 @@ class TaskStore:
     def submit(
         self, agent_id: str, project: Path, goal: str, acceptance: tuple[FileCheck, ...],
         budget: Budget, capabilities: frozenset[str], input_id: str, input_text: str | None = None,
+        *, base_commit: str | None = None,
     ) -> InputReceipt:
         previous = self.input(agent_id, input_id)
         if previous:
@@ -467,12 +468,16 @@ class TaskStore:
             )
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)",
                             (input_id, agent_id, task_id, goal if input_text is None else input_text))
-            self._entry(task_id, None, "input", input_id=input_id)
+            self._entry(task_id, None, "input", input_id=input_id, source="observation" if base_commit else "user")
             self.db.execute("INSERT INTO task_plans VALUES (?, ?)",
                 (task_id, json.dumps(asdict(Plan().revise([goal.strip()[:500]])), ensure_ascii=False)))
+            if base_commit:
+                self.db.execute("UPDATE tasks SET workspace_kind = 'git', base_commit = ? WHERE id = ?",
+                                (base_commit, task_id))
         return InputReceipt(input_id, task_id)
 
-    def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False) -> InputReceipt:
+    def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False,
+                  acceptance: tuple[FileCheck, ...] | None = None, goal: str | None = None) -> InputReceipt:
         previous = self.input(task.agent_id, input_id)
         if previous:
             if previous.task_id != task.id:
@@ -481,12 +486,24 @@ class TaskStore:
         with self.db:
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
             self._entry(task.id, None, "input", input_id=input_id)
+            if goal is not None and not observed:
+                self.db.execute("UPDATE tasks SET goal = ? WHERE id = ?", (goal, task.id))
+                self._entry(task.id, None, "goal_revised", input_id=input_id, goal=goal)
+            if acceptance is not None and not observed:
+                checks = [asdict(check) for check in acceptance]
+                self.db.execute("UPDATE tasks SET acceptance = ? WHERE id = ?", (json.dumps(checks), task.id))
+                self._entry(task.id, None, "acceptance_revised", input_id=input_id, checks=checks)
             if task.state is TaskState.COMPLETED and not observed:
                 budget = Budget()
                 self.db.execute("""UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL, delivery = NULL,
                     model_calls = ?, tool_calls = ?, verifications = ?, compactions = ? WHERE id = ?""",
                     (budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions, task.id))
                 self._entry(task.id, None, "reopened", input_id=input_id)
+            elif (task.state is TaskState.WAITING and not observed
+                  and task.reason not in {RunReason.BUDGET_EXHAUSTED, RunReason.UNKNOWN_EFFECT}):
+                self.db.execute("UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL WHERE id = ?",
+                                (task.id,))
+                self._entry(task.id, None, "unblocked", input_id=input_id)
         return InputReceipt(input_id, task.id)
 
     def task_ids(self, agent_id: str) -> list[str]:

@@ -146,12 +146,13 @@ asyncio.run(run())
 """
 
 
-@pytest.mark.parametrize("ending", ["after", "before", "unknown"])
+@pytest.mark.parametrize("ending", ["after", "before", "unknown", "superseded"])
 def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
     from demoharness import (
         ActionState,
         AgentDefinition,
         AgentRuntime,
+        FileCheck,
         RunReason,
         TaskState,
     )
@@ -165,8 +166,8 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
             str(state),
             str(repo),
             str(receipt_path),
-            "before" if ending == "before" else "after",
-            "2" if ending == "before" else "1",
+            "before" if ending in {"before", "superseded"} else "after",
+            "2" if ending in {"before", "superseded"} else "1",
         ],
         check=False,
         capture_output=True,
@@ -180,19 +181,22 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
     assert process.returncode == -9, process.stderr
     task_id = receipt_path.read_text()
     output = state / "agents" / "a" / "workspaces" / task_id / "crash.py"
-    if ending == "before":
+    if ending in {"before", "superseded"}:
         assert not output.exists()
     else:
         assert output.read_text() == "value = 7\n"
     if ending == "unknown":
         output.write_text("unrelated = True\n")
-    inode_before = output.stat().st_ino if ending != "before" else None
+    inode_before = output.stat().st_ino if output.exists() else None
     script = Script(done())
 
     async def reopen():
         definition = AgentDefinition("a", repo, "scripted", script)
         async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("a")
+            if ending == "superseded":
+                await agent.send("不要创建 crash.py，只检查已有的 source.py", task_id=task_id,
+                                 acceptance=[FileCheck("source.py")])
             task = await agent.wait(task_id)
             old, recovered = agent.runs(task_id)
             assert old.reason is RunReason.INTERRUPTED
@@ -200,6 +204,11 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
             assert action.run_id == old.id
             assert action.call.call_id == "process-write"
             assert action.id.startswith(f"{old.id}:{action.response_id}:")
+            if ending == "superseded":
+                assert task.state is TaskState.COMPLETED, task.detail
+                assert action.attempts == 1 and task.budget.tool_calls == 1
+                assert not output.exists()
+                return
             assert task.budget.tool_calls == 0
             action_entries = [
                 entry
@@ -238,7 +247,7 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
     asyncio.run(reopen())
     if ending == "unknown":
         assert not script.requests
-    else:
+    elif ending != "superseded":
         assert len(script.requests) == 1
         assert script.requests[0].messages[-1]["tool_call_id"] == "process-write"
     if inode_before is not None:

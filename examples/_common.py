@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 
 from demoharness.providers.openai import make_openai_stream_fn
-from demoharness.runtime import BotRuntime, RuntimeConfig
+from demoharness.legacy_runtime import BotRuntime, RuntimeConfig
 
 _ENV_FILE = Path(__file__).parent / ".env"
 _DATA_DIR = Path(__file__).parent / "_data"

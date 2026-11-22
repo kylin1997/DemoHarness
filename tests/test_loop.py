@@ -12,13 +12,12 @@ import json
 import pytest
 
 from demoharness.core.events import EventBus
-from demoharness.core.loop import (
+from demoharness.core.legacy_loop import (
     LoopRuntime,
-    ModelResponse,
-    ModelStop,
     project_context,
     run_task_loop,
 )
+from demoharness.core.loop import ModelResponse, ModelStop
 from demoharness.core.session import AppendOp, NewOp, SessionManager
 from demoharness.core.storage import EntryRow, Storage
 from demoharness.core.task import StopReason

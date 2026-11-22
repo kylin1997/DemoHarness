@@ -65,12 +65,17 @@ def test_repo_change_is_discovered_by_default_and_same_work_is_linked(tmp_path):
 
     commit("Initial notes\n")
     observations = []
+    failed_once = False
 
     async def complete(request, cancel):
+        nonlocal failed_once
         if "你负责判断消息属于哪件事" not in request.system_prompt:
             return ModelResponse(ModelStop.OK, "已记录检查结果。")
         data = json.loads(request.messages[-1]["content"])
         assert data["kind"] == "project_observation"
+        if "TODO" in data["text"] and not failed_once:
+            failed_once = True
+            return ModelResponse(ModelStop.ERROR, "", error="temporary network failure")
         observations.append(data["text"])
         result = {"kind": "skip"}
         if "TODO" in data["text"]:

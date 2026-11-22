@@ -92,6 +92,7 @@ class DelegatingTools:
             ),
             tools=_ChildTools(store, parent.task_id, files),
             context_note=None,
+            after_action=None,
             finish=lambda text: RoleResult(Verdict.PASSED, delivery=Delivery(text[:1600], (), "")),
         )
 

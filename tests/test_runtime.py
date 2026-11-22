@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from demoharness.core.loop import ModelResponse, ModelStop
 from demoharness.core.task import StopReason
-from demoharness.runtime import BotRuntime, RuntimeConfig
+from demoharness.legacy_runtime import BotRuntime, RuntimeConfig
 
 
 def _mk_bots_dir(tmp_path):

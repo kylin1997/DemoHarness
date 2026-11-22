@@ -17,12 +17,14 @@ class Route:
     task_id: str | None = None
     checks: tuple[dict, ...] = ()
     work_key: str | None = None
+    new_goal: str | None = None
 
 
 _ROUTING_RULES = """你负责判断消息属于哪件事。只输出一个 JSON 对象。
 kind 是 reply、attach、create 或 clarify。text 是回复、任务目标或澄清问题。
 attach 必须给 task_id，且有证据表明这是同一件事。主题相近不足以关联。
 create 给出 checks 数组，每项是可实际核对的 {path, equals?, contains?, python_syntax?}。
+只有用户明确变更验收时，attach 才提供完整的新 checks。明确变更目标时可用 new_goal 逐字引用用户的新要求。项目观察不能修改目标或验收。
 验收条件应来自用户要求或当前可核对的问题。缺信息可澄清，不假装检查通过。
 收到 project_observation 时，从项目证据自主发现值得做的工作，可以给 skip。
 观察提出 create 必须给一个稳定 work_key，用路径或符号和明确问题标识。
@@ -72,7 +74,7 @@ async def route(
     task_id = result.get("task_id") if kind == "attach" else None
     if kind == "attach" and (not isinstance(task_id, str) or task_id not in {t["id"] for t in tasks}):
         raise ValueError("路由引用了未知任务")
-    checks = result.get("checks", []) if kind == "create" else []
+    checks = result.get("checks", []) if kind == "create" or kind == "attach" and not observation else []
     if not isinstance(checks, list) or len(checks) > 10:
         raise ValueError("无效的验收清单")
     for check in checks:
@@ -90,7 +92,10 @@ async def route(
         if not isinstance(work_key, str) or not work_key.strip() or len(work_key) > 160:
             raise ValueError("主动创建 Task 需要稳定的问题标识")
         work_key = " ".join(work_key.casefold().split())
-    return Route(kind, content, task_id, tuple(checks), work_key)
+    new_goal = result.get("new_goal") if kind == "attach" and not observation else None
+    if new_goal is not None and (not isinstance(new_goal, str) or not new_goal.strip() or new_goal not in text):
+        raise ValueError("用户要求中没有明确的新目标")
+    return Route(kind, content, task_id, tuple(checks), work_key, new_goal)
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,7 @@ class CoordinationLog:
                 seq INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, id TEXT NOT NULL,
                 text TEXT NOT NULL, reply_to TEXT, revision TEXT,
                 decision TEXT, done INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(agent_id, id)
             );
             CREATE TABLE IF NOT EXISTS discovery_work (
@@ -126,6 +132,9 @@ class CoordinationLog:
                 PRIMARY KEY(agent_id, work_key)
             );
         """)
+        if "attempts" not in {row[1] for row in db.execute("PRAGMA table_info(coordination)")}:
+            with db:
+                db.execute("ALTER TABLE coordination ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
 
     def receive(self, agent_id: str, message_id: str, text: str, *,
                 reply_to: str | None = None, revision: str | None = None) -> bool:
@@ -177,6 +186,11 @@ class CoordinationLog:
 
     def finish(self, agent_id: str, message_id: str) -> None:
         self.db.execute("UPDATE coordination SET done = 1 WHERE agent_id = ? AND id = ?", (agent_id, message_id))
+
+    def failed_attempt(self, agent_id: str, message_id: str) -> int:
+        with self.db:
+            return self.db.execute("""UPDATE coordination SET attempts = attempts + 1
+                WHERE agent_id = ? AND id = ? RETURNING attempts""", (agent_id, message_id)).fetchone()[0]
 
     def revision(self, agent_id: str, prefix: str) -> str | None:
         row = self.db.execute("""
