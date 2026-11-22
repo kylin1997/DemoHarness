@@ -11,7 +11,14 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from .core.plan import Plan, StepState
+from .core.task import Verdict
+
+if TYPE_CHECKING:
+    from .core.storage import HistoryEntry
+    from .core.task import Action
 
 MemoryKind = Literal["preference", "fact", "constraint", "experience"]
 MemoryEvidence = Literal["explicit", "verified", "inferred"]
@@ -20,6 +27,18 @@ MemoryState = Literal["active", "candidate", "archived"]
 _KINDS = {"preference", "fact", "constraint", "experience"}
 _EVIDENCE = {"explicit", "verified", "inferred"}
 _ARCHIVE_RETENTION = 30 * 86400
+_EXPERIENCE_LIFETIME = 30 * 86400
+_PROJECT_DECLARATION = re.compile(
+    r"(project fact|项目事实|project constraint|项目约束)[:：]"
+    r"\s*([^:=：＝]{1,80})[=＝]\s*(.{1,500})",
+    re.IGNORECASE,
+)
+_DECLARATION_KIND: dict[str, MemoryKind] = {
+    "project fact": "fact", "项目事实": "fact",
+    "project constraint": "constraint", "项目约束": "constraint",
+}
+_PLAN_DECISION = re.compile(r"(?:decision|决策)[:：]\s*(.+)", re.IGNORECASE)
+_PLAN_CHECK = re.compile(r"(?:run check |run_check[:：]\s*|运行检查[:：]\s*)(.+)", re.IGNORECASE)
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS agent_memories (
@@ -140,6 +159,74 @@ def _terms(text: str) -> set[str]:
         elif len(word) > 1 and word not in _STOP_WORDS:
             terms.add(word)
     return terms
+
+
+def _user_memories(entry: HistoryEntry, source: str) -> Iterator[MemoryDraft]:
+    text = entry.data.get("text", "")
+    if (entry.run_id is not None or not entry.data.get("input_id")
+            or entry.data.get("source", "user") != "user"
+            or text.startswith("Project observation (evidence):\n")):
+        return
+    for line in text.strip().splitlines():
+        declaration = _PROJECT_DECLARATION.fullmatch(line)
+        if declaration is None:
+            break
+        label, key, value = declaration.groups()
+        key, value = " ".join(key.casefold().split()), value.strip()
+        if key and value:
+            yield MemoryDraft(_DECLARATION_KIND[label.casefold()], key, f"{key}: {value}",
+                              (source,), evidence="explicit")
+
+
+def learn_from_session(
+    history: Iterable[HistoryEntry], actions: Iterable[Action], now: float,
+) -> Iterator[tuple[str, list[MemoryDraft]]]:
+    """Collect memories from trusted inputs, Plan changes, and host checks."""
+    by_id = {action.id: action for action in actions}
+    passed_checks: dict[tuple[str, str], tuple[str, str] | None] = {}
+    plan = Plan()
+    valid_until = now + _EXPERIENCE_LIFETIME
+    for entry in history:
+        source = f"task:{entry.task_id}:entry:{entry.id}"
+        drafts = []
+        if entry.kind == "input":
+            drafts = list(_user_memories(entry, source))
+        elif entry.kind in {"action_result", "completed"}:
+            checks = entry.data.get("checks", ()) if entry.kind == "completed" else ()
+            action = by_id.get(entry.data.get("action_id"))
+            if action and action.call.name == "run_check" and action.result:
+                check = action.result.details or {}
+                passed = not action.result.is_error and check.get("verdict") == Verdict.PASSED
+                checks = (check,) if passed else ()
+                references = {action.id, action.call.call_id, source}
+                for reference in references:
+                    key = (action.run_id, reference)
+                    passed_checks[key] = (check["id"], source) if passed and key not in passed_checks else None
+            drafts = [MemoryDraft(
+                "experience", f"check:{check['id']}",
+                f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。",
+                (source,), evidence="verified", valid_until=valid_until,
+            ) for check in checks if check.get("verdict") == Verdict.PASSED]
+        elif entry.kind == "plan_revised" and entry.run_id is not None:
+            old = {step.id: step for step in plan.steps}
+            plan = Plan.from_record(entry.data["plan"])
+            for step in plan.steps:
+                if step.state != StepState.DONE or step == old.get(step.id):
+                    continue
+                decision = _PLAN_DECISION.fullmatch(step.action)
+                text = decision[1].strip() if decision else step.action
+                recipe = _PLAN_CHECK.fullmatch(text)
+                if not text or (decision is None and recipe is None):
+                    continue
+                proofs = (passed_checks.get((entry.run_id, ref)) for ref in step.evidence)
+                proof = next((check for check in proofs if check and recipe and recipe[1] == check[0]), None)
+                drafts.append(MemoryDraft(
+                    "experience", f"plan:{text}", text,
+                    (source, proof[1]) if proof else (source,),
+                    evidence="verified" if proof else "inferred", valid_until=valid_until,
+                ))
+        if drafts:
+            yield source, drafts
 
 
 class MemoryStore:

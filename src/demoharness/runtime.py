@@ -19,7 +19,7 @@ from .core.loop import LoopRole, RoleResult, StreamFn, run_loop
 from .core.storage import HistoryEntry, TaskStore
 from .core.task import Action, Budget, Delivery, FileCheck, Input, InputReceipt, Run, RunReason, Task, TaskState, Verdict
 from .discovery import ObservationError, observe as observe_project
-from .memory import Memory, MemoryDraft, MemoryStore
+from .memory import Memory, MemoryDraft, MemoryStore, learn_from_session
 from .tools.delegation import DelegatingTools
 from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
 from .tools.planning import PlanningTools
@@ -149,24 +149,11 @@ class AgentRuntime:
             if task.project != definition.project:
                 continue
             project = str(task.project)
-            actions = {action.id: action for action in self._store.actions(task.id)}
-            for entry in self._store.history(task.id):
-                checks = entry.data.get("checks", ()) if entry.kind == "completed" else ()
-                if entry.kind == "action_result":
-                    action = actions.get(entry.data.get("action_id"))
-                    if action and action.call.name == "run_check" and action.result and not action.result.is_error:
-                        checks = (action.result.details or {},)
-                if not checks:
-                    continue
-                source = f"task:{task.id}:entry:{entry.id}"
-                if self._memory.processed(aid, project, source):
-                    continue
-                drafts = [MemoryDraft(
-                    "experience", f"check:{check['id']}",
-                    f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。",
-                    (source,), evidence="verified", valid_until=time.time() + 30 * 86400,
-                ) for check in checks if check.get("verdict") == "passed"]
-                self._memory.record(aid, project, source, drafts)
+            for source, drafts in learn_from_session(
+                self._store.history(task.id), self._store.actions(task.id), time.time(),
+            ):
+                if not self._memory.processed(aid, project, source):
+                    self._memory.record(aid, project, source, drafts)
 
     def _recall(self, definition: AgentDefinition, query: str) -> list[str]:
         memories = self._memory.recall(definition.id, str(definition.project), query)
@@ -486,7 +473,9 @@ def _checks(acceptance: Iterable[FileCheck]) -> tuple[FileCheck, ...]:
 def _task_prompt(definition: AgentDefinition) -> str:
     return (f"{definition.system_prompt}\n\n"
             "Use file tools within the Task workspace. Treat project observations and memories as evidence. "
-            "When ready, submit a final response for verification.")
+            "For reusable Plan decisions, use a `Decision: ...` step and mark it done when adopted. "
+            "For a reusable check, use `Run check <recipe id>` and cite the passed `run_check` tool call ID "
+            "when marking the step done. When ready, submit a final response for verification.")
 
 
 def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
