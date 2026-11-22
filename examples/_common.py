@@ -52,10 +52,12 @@ def make_stream_fn():
 def demo_runtime(name: str) -> BotRuntime:
     """构造 BotRuntime：db 落在 examples/_data/<name>.db，bot 配置用项目 bots/。"""
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    model = load_env().get("MODEL") or os.environ.get("MODEL") or "gpt-4o"
     return BotRuntime.build(
         RuntimeConfig(
             db_path=str(_DATA_DIR / f"{name}.db"),
             bots_dir=str(_BOTS_DIR),
+            model=model,
             stream_fn=make_stream_fn(),
         )
     )
