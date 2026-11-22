@@ -345,9 +345,9 @@ CREATE TABLE IF NOT EXISTS runs (
     config_version TEXT NOT NULL,
     started_at REAL NOT NULL,
     ended_at REAL,
-    reason TEXT
+    reason TEXT,
+    delegation_id TEXT REFERENCES actions(id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(task_id) WHERE ended_at IS NULL;
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -407,11 +407,29 @@ class TaskStore:
             self.db.execute("PRAGMA foreign_keys = ON")
             self.db.execute("PRAGMA journal_mode = WAL")
             self.db.executescript(_TASK_SCHEMA)
+            self._migrate_run_streams()
         except BaseException:
             if hasattr(self, "db"):
                 self.db.close()
             self._lock.close()
             raise
+
+    def _migrate_run_streams(self) -> None:
+        with self.db:
+            self.db.execute("BEGIN")
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(runs)")}
+            if "delegation_id" not in columns:
+                self.db.execute("ALTER TABLE runs ADD COLUMN delegation_id TEXT REFERENCES actions(id)")
+                self.db.execute("DROP INDEX IF EXISTS one_active_run")
+            self.db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_active_task_run ON runs(task_id) "
+                "WHERE ended_at IS NULL AND delegation_id IS NULL"
+            )
+            self.db.execute("CREATE INDEX IF NOT EXISTS delegation_runs ON runs(delegation_id)")
+            self.db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_active_delegation_run ON runs(delegation_id) "
+                "WHERE ended_at IS NULL AND delegation_id IS NOT NULL"
+            )
 
     @property
     def lock_fd(self) -> int:
@@ -476,7 +494,7 @@ class TaskStore:
         return [row[0] for row in rows]
 
     def latest_input(self, task_id: str) -> int:
-        return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM entries WHERE task_id = ? AND kind = 'input'",
+        return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM entries WHERE task_id = ? AND run_id IS NULL AND kind = 'input'",
                                (task_id,)).fetchone()[0]
 
     def set_plan(self, run: Run, plan: Plan, reason: str, action_id: str) -> None:
@@ -516,17 +534,20 @@ class TaskStore:
         rows = self.db.execute("SELECT id FROM tasks WHERE agent_id = ? AND state = 'queued' ORDER BY rowid", (agent_id,))
         return [row["id"] for row in rows]
 
-    def history(self, task_id: str, after: int = 0) -> list[HistoryEntry]:
+    def history(
+        self, task_id: str, after: int = 0, *, delegation_id: str | None = None, limit: int = -1,
+    ) -> list[HistoryEntry]:
         rows = self.db.execute(
             """SELECT e.*, i.text FROM entries e JOIN tasks t ON t.id = e.task_id
+               LEFT JOIN runs r ON r.id = e.run_id
                LEFT JOIN inputs i ON i.agent_id = t.agent_id AND i.id = json_extract(e.data, '$.input_id')
-               WHERE e.task_id = ? AND e.id > ? ORDER BY e.id""",
-            (task_id, after),
+               WHERE e.task_id = ? AND e.id > ? AND r.delegation_id IS ? ORDER BY e.id LIMIT ?""",
+            (task_id, after, delegation_id, limit),
         )
         entries = []
         for row in rows:
             data = json.loads(row["data"])
-            if row["kind"] == "input":
+            if row["kind"] == "input" and row["text"] is not None:
                 data["text"] = row["text"]
             entries.append(HistoryEntry(row["id"], task_id, row["run_id"], row["kind"], data))
         return entries
@@ -551,13 +572,46 @@ class TaskStore:
             self._entry(task_id, run.id, "run_started", config_version=config_version)
         return run
 
+    def claim_delegation(self, parent: Run, action: Action, prompt: str) -> Run:
+        run = Run(uuid4().hex, parent.task_id, parent.config_version, time.time(), delegation_id=action.id)
+        with self.db:
+            prior = self.db.execute("SELECT 1 FROM runs WHERE delegation_id = ?", (action.id,)).fetchone()
+            self.db.execute(
+                "INSERT INTO runs(id, task_id, config_version, started_at, delegation_id) VALUES (?, ?, ?, ?, ?)",
+                (run.id, run.task_id, run.config_version, run.started_at, action.id),
+            )
+            self._entry(run.task_id, run.id, "run_started", config_version=run.config_version)
+            if prior is None:
+                self._entry(run.task_id, run.id, "input", text=prompt)
+        return run
+
+    def delegation_outcome(self, task_id: str, delegation_id: str) -> dict | None:
+        row = self.db.execute(
+            """SELECT e.data FROM runs r JOIN entries e ON e.run_id = r.id
+               WHERE r.task_id = ? AND r.delegation_id = ? AND e.kind = 'delegation_finished'""",
+            (task_id, delegation_id),
+        ).fetchone()
+        return json.loads(row["data"]) if row else None
+
     def recover(self) -> None:
-        runs = self.db.execute("SELECT * FROM runs WHERE ended_at IS NULL").fetchall()
+        runs = self.db.execute("SELECT * FROM runs WHERE ended_at IS NULL AND delegation_id IS NULL").fetchall()
         for row in runs:
             run = _run_row(row)
             with self.db:
                 self._record_interrupted_model(run)
+                self._close_delegations(run.task_id, RunReason.INTERRUPTED, "Previous host exited")
                 self._end(run.task_id, run.id, TaskState.QUEUED, RunReason.INTERRUPTED, "Previous host exited")
+
+    def _close_delegations(self, task_id: str, reason: RunReason, detail: str) -> None:
+        rows = self.db.execute(
+            "SELECT * FROM runs WHERE task_id = ? AND ended_at IS NULL AND delegation_id IS NOT NULL",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            run = _run_row(row)
+            self._record_interrupted_model(run)
+            self.db.execute("UPDATE runs SET ended_at = ?, reason = ? WHERE id = ?", (time.time(), reason, run.id))
+            self._entry(task_id, run.id, reason.value, reason=reason, detail=detail)
 
     def _record_interrupted_model(self, run: Run) -> None:
         started = self.db.execute(
@@ -600,15 +654,28 @@ class TaskStore:
         if self.task(run.task_id).state is TaskState.RUNNING:
             with self.db:
                 self._record_interrupted_model(run)
-                self._end(run.task_id, run.id, state, reason, detail, delivery, checks)
+                if run.delegation_id is not None:
+                    finished = self.db.execute(
+                        "UPDATE runs SET ended_at = ?, reason = ? WHERE id = ? AND ended_at IS NULL",
+                        (time.time(), reason, run.id),
+                    ).rowcount
+                    if finished:
+                        self._entry(run.task_id, run.id, "delegation_finished", status=state, reason=reason,
+                                    summary=delivery.text if delivery else "", detail=detail)
+                else:
+                    self._close_delegations(run.task_id, reason, detail)
+                    self._end(run.task_id, run.id, state, reason, detail, delivery, checks)
 
     def stop(self, task_id: str) -> None:
         if self.task(task_id).state not in (TaskState.QUEUED, TaskState.RUNNING, TaskState.WAITING):
             return
-        active = self.db.execute("SELECT * FROM runs WHERE task_id = ? AND ended_at IS NULL", (task_id,)).fetchone()
+        active = self.db.execute(
+            "SELECT * FROM runs WHERE task_id = ? AND ended_at IS NULL AND delegation_id IS NULL", (task_id,),
+        ).fetchone()
         with self.db:
             if active:
                 self._record_interrupted_model(_run_row(active))
+            self._close_delegations(task_id, RunReason.STOPPED, "User stopped task")
             self._end(task_id, active["id"] if active else None, TaskState.STOPPED, RunReason.STOPPED, "User stopped task")
 
     def enqueue(self, task_id: str, budget: Budget | None) -> None:
@@ -658,7 +725,7 @@ class TaskStore:
     ) -> None:
         with self.db:
             self._entry(run.task_id, run.id, "model_result", request_id=request_id, stop=stop, usage=usage, error=error)
-            if self.latest_input(run.task_id) > request_id:
+            if run.delegation_id is None and self.latest_input(run.task_id) > request_id:
                 self._entry(run.task_id, run.id, "stale_response", request_id=request_id)
                 return
             if stop != "ok" or not (text or calls):
@@ -673,12 +740,18 @@ class TaskStore:
                 )
                 self._entry(run.task_id, run.id, "action_pending", action_id=action_id)
 
-    def actions(self, task_id: str) -> list[Action]:
-        rows = self.db.execute("SELECT * FROM actions WHERE task_id = ? ORDER BY response_id, position", (task_id,))
+    def actions(self, task_id: str, *, delegation_id: str | None = None) -> list[Action]:
+        rows = self.db.execute(
+            """SELECT a.* FROM actions a JOIN runs r ON r.id = a.run_id
+               WHERE a.task_id = ? AND r.delegation_id IS ? ORDER BY a.response_id, a.position""",
+            (task_id, delegation_id),
+        )
         return [_action_row(row) for row in rows]
 
     def start_action(self, run: Run, action: Action, intent: dict | None) -> bool:
         with self.db:
+            if self.db.execute("SELECT 1 FROM runs WHERE delegation_id = ?", (action.id,)).fetchone():
+                return True
             if not self._charge(run.task_id, "tool_calls"):
                 return False
             self.db.execute(
@@ -704,7 +777,8 @@ def _check_evidence(data: dict) -> CheckEvidence:
 
 def _run_row(row: sqlite3.Row) -> Run:
     reason = RunReason(row["reason"]) if row["reason"] else None
-    return Run(row["id"], row["task_id"], row["config_version"], row["started_at"], row["ended_at"], reason)
+    return Run(row["id"], row["task_id"], row["config_version"], row["started_at"], row["ended_at"], reason,
+               row["delegation_id"])
 
 
 def _action_row(row: sqlite3.Row) -> Action:

@@ -441,6 +441,7 @@ def test_workspace_paths_and_tools_are_enforced_in_plain_project(tmp_path):
             "run_check",
             "set_plan",
             "mark_step",
+            "delegate",
         }
 
     asyncio.run(scenario())

@@ -637,6 +637,7 @@ class LoopRole:
     max_tokens: int | None
     context_messages: int
     context_note: Callable[[], str] | None = None
+    model_limit: int | None = None
 
 
 def _calls(response: ModelResponse) -> list[ToolCall]:
@@ -699,7 +700,7 @@ def _verify(store: TaskStore, run: Run, role: LoopRole, proposal: HistoryEntry) 
     verdict = role.finish(proposal.data["text"])
     if store.task(run.task_id).state is not TaskState.RUNNING:
         return False
-    if store.latest_input(run.task_id) > proposal.id:
+    if run.delegation_id is None and store.latest_input(run.task_id) > proposal.id:
         store.record(run, "verification_superseded", proposal_id=proposal.id, checks=[asdict(c) for c in verdict.checks])
         return True
     if verdict.verdict is Verdict.PASSED:
@@ -750,21 +751,25 @@ def _context(
 
 async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.Event) -> None:
     while not cancel.is_set() and store.task(run.task_id).state is TaskState.RUNNING:
-        actions = store.actions(run.task_id)
+        actions = store.actions(run.task_id, delegation_id=run.delegation_id)
         action = next((action for action in actions if action.state is not ActionState.RESULT), None)
         if action is not None:
-            if action.state is ActionState.PENDING and store.latest_input(run.task_id) > action.response_id:
+            if (run.delegation_id is None and action.state is ActionState.PENDING
+                    and store.latest_input(run.task_id) > action.response_id):
                 store.result(run, action, ToolResult("Skipped because the user added new input", is_error=True))
                 continue
             if not await _advance_action(store, run, role.tools, action, cancel):
                 return
             continue
-        entries = store.history(run.task_id)
+        entries = store.history(run.task_id, delegation_id=run.delegation_id)
         proposal = _proposal(entries)
         if proposal is not None:
             if not _verify(store, run, role, proposal):
                 return
             continue
+        if role.model_limit is not None and sum(entry.kind == "model_started" for entry in entries) >= role.model_limit:
+            _budget_wait(store, run, "delegated model calls")
+            return
         lengths = _length_failures(entries)
         if len(lengths) > 1:
             store.end(run, TaskState.FAILED, RunReason.MODEL_LENGTH, "Model exceeded its length limit after one retry")
@@ -789,7 +794,7 @@ async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.E
         if cancel.is_set() or store.task(run.task_id).state is not TaskState.RUNNING:
             return
         store.model_response(run, request_id, response.stop_reason.value, response.text, calls, response.usage, response.error)
-        if store.latest_input(run.task_id) > request_id:
+        if run.delegation_id is None and store.latest_input(run.task_id) > request_id:
             continue
         if response.stop_reason is ModelStop.ERROR:
             store.end(run, TaskState.FAILED, RunReason.MODEL_ERROR, response.error or "Model request failed")

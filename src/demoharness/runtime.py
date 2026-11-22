@@ -26,7 +26,7 @@ import subprocess
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -72,6 +72,7 @@ from .core.task import (
 from .core.tools import Tool, ToolRegistry
 from .discovery import ObservationError, observe as observe_project
 from .memory import Memory, MemoryDraft, MemoryStore
+from .tools.delegation import DelegatingTools
 from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
 from .tools.planning import PlanningTools
 
@@ -808,6 +809,7 @@ class AgentRuntime:
                 lambda text: _finish_file_task(file_tools, task, text), definition.max_tokens, definition.context_messages,
                 context_note=lambda: self._task_context(definition, task_id),
             )
+            role = replace(role, tools=DelegatingTools(store, run, role, file_tools))
             await run_loop(store, run, role, cancel)
         except asyncio.CancelledError:
             store.end(run, TaskState.QUEUED, RunReason.PAUSED, "Host shutdown paused the Task")
@@ -940,9 +942,9 @@ class Agent:
             raise KeyError(task_id)
         return task
 
-    def history(self, task_id: str, *, after: int = 0) -> list[HistoryEntry]:
+    def history(self, task_id: str, *, after: int = 0, delegation_id: str | None = None) -> list[HistoryEntry]:
         self.task(task_id)
-        return self._runtime._store.history(task_id, after)
+        return self._runtime._store.history(task_id, after, delegation_id=delegation_id)
 
     def notices(self, task_id: str) -> list[HistoryEntry]:
         return [entry for entry in self.history(task_id) if entry.kind in {"completed", "waiting", "failed", "stopped"}]
@@ -957,9 +959,9 @@ class Agent:
         self.task(task_id)
         return self._runtime._store.runs(task_id)
 
-    def actions(self, task_id: str) -> list[Action]:
+    def actions(self, task_id: str, *, delegation_id: str | None = None) -> list[Action]:
         self.task(task_id)
-        return self._runtime._store.actions(task_id)
+        return self._runtime._store.actions(task_id, delegation_id=delegation_id)
 
     async def wait(self, task_id: str) -> Task:
         self.task(task_id)

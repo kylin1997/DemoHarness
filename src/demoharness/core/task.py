@@ -433,6 +433,7 @@ class Run:
     started_at: float
     ended_at: float | None = None
     reason: RunReason | None = None
+    delegation_id: str | None = None
 
 
 class ActionState(StrEnum):
