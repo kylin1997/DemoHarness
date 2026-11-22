@@ -24,10 +24,15 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .session import SessionManager
-from .storage import EntryRow, Storage
+from .tools import ToolCall, ToolResult
+
+if TYPE_CHECKING:
+    from .session import SessionManager
+    from .storage import EntryRow, Storage
 
 # entry kind 全集（本模块用到的）——与 storage-session.md 的 kind 约定一致。
 USER_KIND = "user"
@@ -188,6 +193,8 @@ async def materialize_interrupted(session_mgr: SessionManager, sid: str) -> str 
 
 
 def _materialize(storage: Storage, sid: str) -> str | None:
+    from .storage import EntryRow
+
     """物化中断的核心逻辑（async 包装与启动扫描共用同一实现）。
 
     - 幂等：活跃分支已含 interrupted 或终态 entry → 返回 None。
@@ -305,3 +312,142 @@ def _is_unteminated(prefix: list[EntryRow]) -> bool:
 def _phase_of(prefix: list[EntryRow]) -> str | None:
     """把前缀映射成一个可读 phase 快照（供报告与诊断）。"""
     return decide(prefix).value
+
+class TaskState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STOPPED = "stopped"
+
+
+class RunReason(StrEnum):
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    PAUSED = "paused"
+    INTERRUPTED = "interrupted"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    MODEL_ERROR = "model_error"
+    MODEL_LENGTH = "model_length"
+    MODEL_ABORTED = "model_aborted"
+    EMPTY_RESPONSE = "empty_response"
+    VERIFICATION_FAILED = "verification_failed"
+    UNVERIFIABLE = "unverifiable"
+    UNKNOWN_EFFECT = "unknown_effect"
+    WORKSPACE_ERROR = "workspace_error"
+    RUNTIME_ERROR = "runtime_error"
+
+
+class Verdict(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    UNVERIFIABLE = "unverifiable"
+
+
+@dataclass(frozen=True)
+class Budget:
+    model_calls: int = 12
+    tool_calls: int = 24
+    verifications: int = 3
+    compactions: int = 3
+
+    def __post_init__(self) -> None:
+        for count in vars(self).values():
+            if type(count) is not int or count < 0:
+                raise ValueError("Budget counts must be non-negative integers")
+
+
+@dataclass(frozen=True)
+class FileCheck:
+    path: str
+    equals: str | None = None
+    contains: str | None = None
+    python_syntax: bool = False
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ValueError("A file check needs a path")
+        if not self.id:
+            object.__setattr__(self, "id", self.path)
+
+
+@dataclass(frozen=True)
+class CheckEvidence:
+    id: str
+    path: str
+    verdict: Verdict
+    detail: str
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class Delivery:
+    text: str
+    checks: tuple[CheckEvidence, ...]
+    diff: str
+
+
+@dataclass(frozen=True)
+class Task:
+    id: str
+    agent_id: str
+    project: Path
+    goal: str
+    acceptance: tuple[FileCheck, ...]
+    workspace: Path
+    state: TaskState
+    budget: Budget
+    capabilities: frozenset[str]
+    session_id: str
+    base_commit: str | None = None
+    workspace_kind: str | None = None
+    workspace_ready: bool = False
+    reason: RunReason | None = None
+    detail: str | None = None
+    delivery: Delivery | None = None
+
+
+@dataclass(frozen=True)
+class Input:
+    id: str
+    agent_id: str
+    task_id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class InputReceipt:
+    input_id: str
+    task_id: str
+
+
+@dataclass(frozen=True)
+class Run:
+    id: str
+    task_id: str
+    config_version: str
+    started_at: float
+    ended_at: float | None = None
+    reason: RunReason | None = None
+
+
+class ActionState(StrEnum):
+    PENDING = "pending"
+    STARTED = "started"
+    RESULT = "result"
+
+
+@dataclass(frozen=True)
+class Action:
+    id: str
+    task_id: str
+    run_id: str
+    response_id: int
+    position: int
+    call: ToolCall
+    state: ActionState
+    attempts: int
+    intent: dict | None
+    result: ToolResult | None

@@ -26,11 +26,15 @@ tools 数组即此情形）。不引入 jsonschema，保持 httpx 唯一依赖�
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from .task import Action
 
 
 class ReplayPolicy(Enum):
@@ -326,3 +330,27 @@ async def _execute_one(registry: ToolRegistry, cancel: asyncio.Event, call: Tool
         result.details = {}
     result.details["duration"] = round(time.monotonic() - start, 4)
     return result
+
+
+class ToolRejected(ValueError):
+    pass
+
+
+class UnknownEffect(Exception):
+    pass
+
+
+class RecoverableTools(Protocol):
+    def definitions(self) -> list[ToolSpec]: ...
+
+    def authorize(self, action: Action) -> None: ...
+
+    def prepare(self, action: Action) -> dict | None: ...
+
+    def reconcile(self, action: Action) -> ToolResult | None: ...
+
+    async def execute(self, action: Action, intent: dict | None, cancel: asyncio.Event) -> ToolResult: ...
+
+
+def model_tool_call(call_id: str, name: str, params: dict) -> dict:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(params)}}

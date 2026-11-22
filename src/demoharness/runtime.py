@@ -19,14 +19,23 @@ start() 提交进会话 FIFO 立即返回 TaskHandle，phase 从 QUEUED 开始�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import subprocess
+from collections.abc import Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .core.events import Event, EventBus
 from .core.loop import (
+    LoopRole,
     LoopRuntime,
+    RoleResult,
+    StreamFn,
+    run_loop,
     run_task_loop,
 )
 from .core.session import (
@@ -39,14 +48,26 @@ from .core.session import (
     SessionInfo,
     SessionManager,
 )
-from .core.storage import EntryRow, SessionRow, Storage
+from .core.storage import EntryRow, HistoryEntry, SessionRow, Storage, TaskStore
 from .core.task import (
+    Action,
+    Budget,
+    Delivery,
+    FileCheck,
+    Input,
+    InputReceipt,
+    Run,
+    RunReason,
     StopReason,
+    Task,
+    TaskState,
+    Verdict,
     is_terminal_entry,
     scan_and_recover,
     stop_reason_of,
 )
 from .core.tools import Tool, ToolRegistry
+from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
 
 # ── 公开类型（形状见 botruntime-api.md） ──
 
@@ -534,3 +555,252 @@ class Bot:
             before_hooks=[rt.plan_mode.before_hook] if rt.plan_mode.enabled else [],
             compaction=rt._make_compactor(model, stream_fn),
         )
+
+
+@dataclass(frozen=True)
+class AgentDefinition:
+    id: str
+    project: str | Path
+    model: str
+    complete: StreamFn
+    system_prompt: str = ""
+    capabilities: frozenset[str] = FILE_CAPABILITIES
+    max_tokens: int | None = None
+    context_messages: int = 16
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.model:
+            raise ValueError("An Agent needs an id and a model")
+        if self.context_messages <= 0 or self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError("Context and output limits must be positive")
+        capabilities = frozenset(self.capabilities)
+        if capabilities - FILE_CAPABILITIES:
+            raise ValueError(f"Unknown file capabilities: {sorted(capabilities - FILE_CAPABILITIES)}")
+        object.__setattr__(self, "project", Path(self.project).resolve())
+        object.__setattr__(self, "capabilities", capabilities)
+
+    @property
+    def version(self) -> str:
+        definition = [self.id, str(self.project), self.model, self.system_prompt,
+                      sorted(self.capabilities), self.max_tokens, self.context_messages]
+        return hashlib.sha256(json.dumps(definition).encode()).hexdigest()
+
+
+@dataclass
+class _Worker:
+    job: asyncio.Task[None]
+    cancel: asyncio.Event
+
+
+class AgentRuntime:
+    """Own one SQLite state directory and its in-process Task workers."""
+
+    def __init__(self, store: TaskStore, definitions: dict[str, AgentDefinition]):
+        self._store = store
+        self._definitions = definitions
+        self._workers: dict[str, _Worker] = {}
+        self._closing = False
+
+    @classmethod
+    @asynccontextmanager
+    async def open(cls, state_dir: str | Path, agents: Iterable[AgentDefinition]):
+        root = Path(state_dir).resolve()
+        definitions = {}
+        for definition in agents:
+            if definition.id in definitions:
+                raise ValueError(f"Duplicate Agent id: {definition.id}")
+            if Path(definition.project).is_relative_to(root):
+                raise ValueError("The Agent project cannot be inside its runtime state directory")
+            definitions[definition.id] = definition
+        runtime = cls(TaskStore(root), definitions)
+        try:
+            runtime._store.recover()
+            for definition in definitions.values():
+                for task_id in runtime._store.queued(definition.id):
+                    runtime._schedule(definition, task_id)
+            yield runtime
+        finally:
+            await runtime._close()
+
+    def agent(self, agent_id: str) -> Agent:
+        return Agent(self, self._definitions[agent_id])
+
+    def _schedule(self, definition: AgentDefinition, task_id: str) -> None:
+        if self._closing:
+            raise RuntimeError("AgentRuntime is closing")
+        worker = self._workers.get(task_id)
+        if worker and not worker.job.done():
+            return
+        cancel = asyncio.Event()
+        job = asyncio.create_task(self._work(definition, task_id, cancel))
+        self._workers[task_id] = _Worker(job, cancel)
+
+        def discard(finished: asyncio.Task[None]) -> None:
+            worker = self._workers.get(task_id)
+            if worker and worker.job is finished:
+                del self._workers[task_id]
+
+        job.add_done_callback(discard)
+
+    async def _work(self, definition: AgentDefinition, task_id: str, cancel: asyncio.Event) -> None:
+        if cancel.is_set():
+            return
+        store = self._store
+        run = store.claim(task_id, definition.version)
+        if run is None:
+            return
+        try:
+            task = store.task(task_id)
+            if task.project != definition.project:
+                raise WorkspaceError("The configured project differs from the Task's project")
+            workspace = Workspace(task, store.root, store.lock_fd)
+            if not task.workspace_ready:
+                if task.workspace_kind is None:
+                    kind, base = workspace.describe()
+                    store.workspace_started(run, kind, base)
+                    task = store.task(task_id)
+                    workspace = Workspace(task, store.root, store.lock_fd)
+                workspace.prepare()
+                store.workspace_ready(run)
+            else:
+                workspace.validate()
+            file_tools = FileTools(workspace, task.capabilities & definition.capabilities, task.acceptance)
+            role = LoopRole(
+                definition.complete, definition.model, _task_prompt(definition, task), file_tools,
+                lambda text: _finish_file_task(file_tools, task, text), definition.max_tokens, definition.context_messages,
+            )
+            await run_loop(store, run, role, cancel)
+        except asyncio.CancelledError:
+            store.end(run, TaskState.QUEUED, RunReason.PAUSED, "Host shutdown paused the Task")
+        except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
+            store.end(run, TaskState.WAITING, RunReason.WORKSPACE_ERROR, str(error))
+        except Exception as error:  # noqa: BLE001
+            store.end(run, TaskState.FAILED, RunReason.RUNTIME_ERROR, f"{type(error).__name__}: {error}")
+        finally:
+            if cancel.is_set():
+                store.end(run, TaskState.QUEUED, RunReason.PAUSED, "Host shutdown paused the Task")
+
+    async def _wait(self, task_id: str) -> None:
+        worker = self._workers.get(task_id)
+        if worker:
+            await asyncio.shield(worker.job)
+
+    async def _close(self) -> None:
+        self._closing = True
+        jobs = []
+        for task_id, worker in self._workers.items():
+            worker.cancel.set()
+            if self._store.task(task_id).state is TaskState.RUNNING:
+                worker.job.cancel()
+            jobs.append(worker.job)
+        try:
+            await asyncio.gather(*jobs)
+        finally:
+            self._store.close()
+
+
+class Agent:
+    def __init__(self, runtime: AgentRuntime, definition: AgentDefinition):
+        self._runtime = runtime
+        self.definition = definition
+
+    @property
+    def id(self) -> str:
+        return self.definition.id
+
+    async def submit(
+        self, goal: str, *, acceptance: Iterable[FileCheck] = (), budget: Budget | None = None,
+        input_id: str | None = None,
+    ) -> InputReceipt:
+        store = self._runtime._store
+        if input_id is not None and not input_id:
+            raise ValueError("Input id must be nonempty")
+        if input_id is not None:
+            previous = store.input(self.id, input_id)
+            if previous:
+                return InputReceipt(previous.id, previous.task_id)
+        if not goal.strip():
+            raise ValueError("A Task goal must be nonempty")
+        checks = tuple(acceptance)
+        if len({check.id for check in checks}) != len(checks):
+            raise ValueError("Check recipe ids must be unique within a Task")
+        receipt = store.submit(self.id, Path(self.definition.project), goal, checks, budget or Budget(),
+                               self.definition.capabilities, input_id or uuid4().hex)
+        self._runtime._schedule(self.definition, receipt.task_id)
+        return receipt
+
+    def task(self, task_id: str) -> Task:
+        task = self._runtime._store.task(task_id)
+        if task.agent_id != self.id:
+            raise KeyError(task_id)
+        return task
+
+    def history(self, task_id: str, *, after: int = 0) -> list[HistoryEntry]:
+        self.task(task_id)
+        return self._runtime._store.history(task_id, after)
+
+    def notices(self, task_id: str) -> list[HistoryEntry]:
+        return [entry for entry in self.history(task_id) if entry.kind in {"completed", "waiting", "failed", "stopped"}]
+
+    def input(self, input_id: str) -> Input:
+        result = self._runtime._store.input(self.id, input_id)
+        if result is None:
+            raise KeyError(input_id)
+        return result
+
+    def runs(self, task_id: str) -> list[Run]:
+        self.task(task_id)
+        return self._runtime._store.runs(task_id)
+
+    def actions(self, task_id: str) -> list[Action]:
+        self.task(task_id)
+        return self._runtime._store.actions(task_id)
+
+    async def wait(self, task_id: str) -> Task:
+        self.task(task_id)
+        await self._runtime._wait(task_id)
+        return self.task(task_id)
+
+    async def stop(self, task_id: str) -> Task:
+        task = self.task(task_id)
+        self._runtime._store.stop(task_id)
+        worker = self._runtime._workers.get(task_id)
+        if worker:
+            worker.cancel.set()
+            if task.state is TaskState.RUNNING:
+                worker.job.cancel()
+            await self._runtime._wait(task_id)
+        return self.task(task_id)
+
+    async def resume(self, task_id: str, *, budget: Budget | None = None) -> Task:
+        task = await self.wait(task_id)
+        if task.state not in (TaskState.STOPPED, TaskState.WAITING):
+            return task
+        if task.reason is RunReason.BUDGET_EXHAUSTED and budget is None:
+            return task
+        self._runtime._store.enqueue(task_id, budget)
+        self._runtime._schedule(self.definition, task_id)
+        return self.task(task_id)
+
+
+def _task_prompt(definition: AgentDefinition, task: Task) -> str:
+    checks = [{"recipe_id": check.id, "path": check.path, "equals": check.equals, "contains": check.contains,
+               "python_syntax": check.python_syntax} for check in task.acceptance]
+    return (f"{definition.system_prompt}\n\nTask goal: {task.goal}\n"
+            f"Acceptance checks: {json.dumps(checks, ensure_ascii=False)}\n"
+            "Use file tools within the Task workspace. When ready, submit a final response for verification.")
+
+
+def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
+    if not task.acceptance:
+        return RoleResult(Verdict.UNVERIFIABLE, "The Task has no typed acceptance checks")
+    checks = tuple(tools.check(check) for check in task.acceptance)
+    problems = [f"{check.id}: {check.detail}" for check in checks if check.verdict is not Verdict.PASSED]
+    if problems:
+        verdict = Verdict.UNVERIFIABLE if any(check.verdict is Verdict.UNVERIFIABLE for check in checks) else Verdict.FAILED
+        return RoleResult(verdict, "\n".join(problems), checks)
+    try:
+        diff = tools.workspace.diff()
+    except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
+        return RoleResult(Verdict.UNVERIFIABLE, f"Cannot collect the workspace diff: {error}", checks)
+    return RoleResult(Verdict.PASSED, checks=checks, delivery=Delivery(text, checks, diff))
