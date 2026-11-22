@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .plan import Plan
 from .task import (
     Action,
     ActionState,
@@ -371,6 +372,13 @@ CREATE TABLE IF NOT EXISTS actions (
     UNIQUE (response_id, position)
 );
 CREATE INDEX IF NOT EXISTS task_actions ON actions(task_id, response_id, position);
+CREATE TABLE IF NOT EXISTS task_plans (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id), plan TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notices (
+    seq INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, message_id TEXT,
+    task_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL
+);
 """
 
 
@@ -423,7 +431,7 @@ class TaskStore:
 
     def submit(
         self, agent_id: str, project: Path, goal: str, acceptance: tuple[FileCheck, ...],
-        budget: Budget, capabilities: frozenset[str], input_id: str,
+        budget: Budget, capabilities: frozenset[str], input_id: str, input_text: str | None = None,
     ) -> InputReceipt:
         previous = self.input(agent_id, input_id)
         if previous:
@@ -439,9 +447,44 @@ class TaskStore:
                  str(self.root / "workspaces" / task_id), json.dumps(sorted(capabilities)),
                  budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions),
             )
-            self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, agent_id, task_id, goal))
+            self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)",
+                            (input_id, agent_id, task_id, goal if input_text is None else input_text))
             self._entry(task_id, None, "input", input_id=input_id)
+            self.db.execute("INSERT INTO task_plans VALUES (?, ?)",
+                (task_id, json.dumps(asdict(Plan().revise([goal.strip()[:500]])), ensure_ascii=False)))
         return InputReceipt(input_id, task_id)
+
+    def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False) -> InputReceipt:
+        previous = self.input(task.agent_id, input_id)
+        if previous:
+            if previous.task_id != task.id:
+                raise ValueError("This input is already attached to another Task")
+            return InputReceipt(input_id, task.id)
+        with self.db:
+            self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
+            self._entry(task.id, None, "input", input_id=input_id)
+            if task.state is TaskState.COMPLETED and not observed:
+                budget = Budget()
+                self.db.execute("""UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL, delivery = NULL,
+                    model_calls = ?, tool_calls = ?, verifications = ?, compactions = ? WHERE id = ?""",
+                    (budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions, task.id))
+                self._entry(task.id, None, "reopened", input_id=input_id)
+        return InputReceipt(input_id, task.id)
+
+    def task_ids(self, agent_id: str) -> list[str]:
+        rows = self.db.execute("SELECT id FROM tasks WHERE agent_id = ? ORDER BY rowid DESC", (agent_id,))
+        return [row[0] for row in rows]
+
+    def latest_input(self, task_id: str) -> int:
+        return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM entries WHERE task_id = ? AND kind = 'input'",
+                               (task_id,)).fetchone()[0]
+
+    def set_plan(self, run: Run, plan: Plan, reason: str, action_id: str) -> None:
+        plan_data = asdict(plan)
+        with self.db:
+            self.db.execute("""INSERT INTO task_plans VALUES (?, ?) ON CONFLICT(task_id)
+                DO UPDATE SET plan = excluded.plan""", (run.task_id, json.dumps(plan_data, ensure_ascii=False)))
+            self._entry(run.task_id, run.id, "plan_revised", plan=plan_data, reason=reason, action_id=action_id)
 
     def input(self, agent_id: str, input_id: str) -> Input | None:
         row = self.db.execute("SELECT * FROM inputs WHERE agent_id = ? AND id = ?", (agent_id, input_id)).fetchone()
@@ -455,6 +498,7 @@ class TaskStore:
         if delivery:
             checks = tuple(_check_evidence(check) for check in delivery["checks"])
             delivery = Delivery(delivery["text"], checks, delivery["diff"])
+        plan_row = self.db.execute("SELECT plan FROM task_plans WHERE task_id = ?", (task_id,)).fetchone()
         return Task(
             id=row["id"], agent_id=row["agent_id"], project=Path(row["project"]), goal=row["goal"],
             acceptance=tuple(FileCheck(**check) for check in json.loads(row["acceptance"])),
@@ -465,6 +509,7 @@ class TaskStore:
             workspace_ready=bool(row["workspace_ready"]),
             reason=RunReason(row["reason"]) if row["reason"] else None,
             detail=row["detail"], delivery=delivery,
+            plan=Plan.from_record(json.loads(plan_row[0])) if plan_row else Plan(),
         )
 
     def queued(self, agent_id: str) -> list[str]:
@@ -541,7 +586,12 @@ class TaskStore:
              task_id),
         )
         kind = reason if state is TaskState.QUEUED else state
-        self._entry(task_id, run_id, kind, reason=reason, detail=detail, checks=[asdict(check) for check in checks])
+        self._entry(task_id, run_id, kind, reason=reason, detail=detail, checks=[asdict(check) for check in checks],
+                    delivery=asdict(delivery) if delivery else None)
+        if state in {TaskState.COMPLETED, TaskState.WAITING, TaskState.FAILED, TaskState.STOPPED}:
+            text = delivery.text if delivery else detail or reason.value
+            self.db.execute("""INSERT INTO notices(agent_id, task_id, kind, text)
+                SELECT agent_id, id, ?, ? FROM tasks WHERE id = ?""", (state, text, task_id))
 
     def end(
         self, run: Run, state: TaskState, reason: RunReason, detail: str = "", delivery: Delivery | None = None,
@@ -608,6 +658,9 @@ class TaskStore:
     ) -> None:
         with self.db:
             self._entry(run.task_id, run.id, "model_result", request_id=request_id, stop=stop, usage=usage, error=error)
+            if self.latest_input(run.task_id) > request_id:
+                self._entry(run.task_id, run.id, "stale_response", request_id=request_id)
+                return
             if stop != "ok" or not (text or calls):
                 return
             response_id = self._entry(run.task_id, run.id, "assistant", text=text, proposal=not calls)

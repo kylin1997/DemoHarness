@@ -22,13 +22,14 @@ import asyncio
 import hashlib
 import json
 import subprocess
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .coordination import CoordinationLog, Message, Notice, Route, route
 from .core.events import Event, EventBus
 from .core.loop import (
     LoopRole,
@@ -68,6 +69,7 @@ from .core.task import (
 )
 from .core.tools import Tool, ToolRegistry
 from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
+from .tools.planning import PlanningTools
 
 # ── 公开类型（形状见 botruntime-api.md） ──
 
@@ -599,11 +601,13 @@ class AgentRuntime:
         self._store = store
         self._definitions = definitions
         self._workers: dict[str, _Worker] = {}
+        self._coordination = CoordinationLog(store.db)
+        self._coordinators: dict[str, asyncio.Task] = {}
         self._closing = False
 
     @classmethod
     @asynccontextmanager
-    async def open(cls, state_dir: str | Path, agents: Iterable[AgentDefinition]):
+    async def open(cls, state_dir: str | Path, agents: Iterable[AgentDefinition], *, observe: bool = True):
         root = Path(state_dir).resolve()
         definitions = {}
         for definition in agents:
@@ -616,6 +620,7 @@ class AgentRuntime:
         try:
             runtime._store.recover()
             for definition in definitions.values():
+                runtime._schedule_coordinator(definition)
                 for task_id in runtime._store.queued(definition.id):
                     runtime._schedule(definition, task_id)
             yield runtime
@@ -624,6 +629,62 @@ class AgentRuntime:
 
     def agent(self, agent_id: str) -> Agent:
         return Agent(self, self._definitions[agent_id])
+
+    def _schedule_coordinator(self, definition: AgentDefinition) -> None:
+        job = self._coordinators.get(definition.id)
+        if not self._closing and (job is None or job.done()):
+            self._coordinators[definition.id] = asyncio.create_task(self._coordinate(definition))
+
+    async def _coordinate(self, definition: AgentDefinition) -> None:
+        aid = definition.id
+        while not self._closing and (message := self._coordination.next(aid)) is not None:
+            try:
+                decision = message.decision
+                if decision is None:
+                    tasks = self.agent(aid).tasks()[:20]
+                    decision = await route(
+                        definition.complete, definition.model, definition.system_prompt,
+                        text=message.text,
+                        tasks=[{"id": t.id, "goal": t.goal, "state": t.state} for t in tasks],
+                        conversation=self._coordination.conversation(aid), memories=[], reply_to=message.reply_to,
+                        observation=message.revision is not None, cancel=asyncio.Event(),
+                    )
+                    self._coordination.decided(aid, message.id, decision)
+                self._apply_route(definition, message, decision)
+            except (ValueError, KeyError, TypeError, AttributeError, TimeoutError) as error:
+                with self._store.db:
+                    self._coordination.notice(aid, "blocked", f"无法判断消息归属：{error}", message_id=message.id)
+                    self._coordination.finish(aid, message.id)
+
+    def _apply_route(self, definition: AgentDefinition, message: Message, decision: Route) -> None:
+        aid = definition.id
+        observed = message.revision is not None
+        target = decision.task_id
+        work_key = f"{definition.project}:{decision.work_key}" if decision.work_key else None
+        if work_key:
+            target = self._coordination.task_for_work(aid, work_key)
+        receipt = None
+        if target:
+            task = self.agent(aid).task(target)
+            receipt = self._store.follow_up(task, message.id, message.text, observed=observed)
+        elif decision.kind == "create":
+            capabilities = definition.capabilities
+            if observed:
+                capabilities &= frozenset({"read_file", "run_check"})
+            receipt = self._store.submit(
+                aid, Path(definition.project), decision.text, _checks(FileCheck(**check) for check in decision.checks),
+                Budget(), capabilities, message.id, message.text,
+            )
+        with self._store.db:
+            if decision.kind in {"reply", "clarify"}:
+                self._coordination.notice(aid, decision.kind, decision.text, message_id=message.id)
+            if receipt and work_key and target is None:
+                self._coordination.remember_work(aid, work_key, receipt.task_id)
+                self._coordination.notice(aid, "discovered", f"发现新工作：{decision.text}",
+                                          message_id=message.id, task_id=receipt.task_id)
+            self._coordination.finish(aid, message.id)
+        if receipt and self._store.task(receipt.task_id).state is TaskState.QUEUED:
+            self._schedule(definition, receipt.task_id)
 
     def _schedule(self, definition: AgentDefinition, task_id: str) -> None:
         if self._closing:
@@ -664,10 +725,11 @@ class AgentRuntime:
                 store.workspace_ready(run)
             else:
                 workspace.validate()
-            file_tools = FileTools(workspace, task.capabilities & definition.capabilities, task.acceptance)
+            file_tools = PlanningTools(workspace, task.capabilities & definition.capabilities, task.acceptance, store, run)
             role = LoopRole(
                 definition.complete, definition.model, _task_prompt(definition, task), file_tools,
                 lambda text: _finish_file_task(file_tools, task, text), definition.max_tokens, definition.context_messages,
+                context_note=lambda: "Current Plan: " + json.dumps(asdict(store.task(task_id).plan), ensure_ascii=False),
             )
             await run_loop(store, run, role, cancel)
         except asyncio.CancelledError:
@@ -687,6 +749,10 @@ class AgentRuntime:
 
     async def _close(self) -> None:
         self._closing = True
+        coordinators = list(self._coordinators.values())
+        for job in coordinators:
+            job.cancel()
+        await asyncio.gather(*coordinators, return_exceptions=True)
         jobs = []
         for task_id, worker in self._workers.items():
             worker.cancel.set()
@@ -721,13 +787,43 @@ class Agent:
                 return InputReceipt(previous.id, previous.task_id)
         if not goal.strip():
             raise ValueError("A Task goal must be nonempty")
-        checks = tuple(acceptance)
-        if len({check.id for check in checks}) != len(checks):
-            raise ValueError("Check recipe ids must be unique within a Task")
+        checks = _checks(acceptance)
         receipt = store.submit(self.id, Path(self.definition.project), goal, checks, budget or Budget(),
                                self.definition.capabilities, input_id or uuid4().hex)
         self._runtime._schedule(self.definition, receipt.task_id)
         return receipt
+
+    async def send(self, text: str, *, message_id: str | None = None, task_id: str | None = None,
+                   reply_to: str | None = None) -> str:
+        if not text.strip():
+            raise ValueError("消息不能为空")
+        message_id = message_id or uuid4().hex
+        runtime = self._runtime
+        if task_id is None:
+            runtime._coordination.receive(self.id, message_id, text, reply_to=reply_to)
+            runtime._schedule_coordinator(self.definition)
+        else:
+            task = self.task(task_id)
+            store = runtime._store
+            previous = store.input(self.id, message_id)
+            store.follow_up(task, message_id, text)
+            if previous is None:
+                with store.db:
+                    runtime._coordination.notice(self.id, "received", "已接收补充要求。",
+                                                  message_id=message_id, task_id=task_id)
+            if store.task(task_id).state is TaskState.QUEUED:
+                runtime._schedule(self.definition, task_id)
+        return message_id
+
+    def tasks(self) -> list[Task]:
+        return [self.task(task_id) for task_id in self._runtime._store.task_ids(self.id)]
+
+    async def updates(self, after: int = 0) -> AsyncIterator[Notice]:
+        while not self._runtime._closing:
+            for notice in self._runtime._coordination.notices(self.id, after):
+                after = notice.id
+                yield notice
+            await asyncio.sleep(0.1)
 
     def task(self, task_id: str) -> Task:
         task = self._runtime._store.task(task_id)
@@ -781,6 +877,13 @@ class Agent:
         self._runtime._store.enqueue(task_id, budget)
         self._runtime._schedule(self.definition, task_id)
         return self.task(task_id)
+
+
+def _checks(acceptance: Iterable[FileCheck]) -> tuple[FileCheck, ...]:
+    checks = tuple(acceptance)
+    if len({check.id for check in checks}) != len(checks):
+        raise ValueError("Check recipe ids must be unique within a Task")
+    return checks
 
 
 def _task_prompt(definition: AgentDefinition, task: Task) -> str:

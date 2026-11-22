@@ -636,6 +636,7 @@ class LoopRole:
     finish: Callable[[str], RoleResult]
     max_tokens: int | None
     context_messages: int
+    context_note: Callable[[], str] | None = None
 
 
 def _calls(response: ModelResponse) -> list[ToolCall]:
@@ -696,6 +697,11 @@ def _verify(store: TaskStore, run: Run, role: LoopRole, proposal: HistoryEntry) 
         _budget_wait(store, run, "verification")
         return False
     verdict = role.finish(proposal.data["text"])
+    if store.task(run.task_id).state is not TaskState.RUNNING:
+        return False
+    if store.latest_input(run.task_id) > proposal.id:
+        store.record(run, "verification_superseded", proposal_id=proposal.id, checks=[asdict(c) for c in verdict.checks])
+        return True
     if verdict.verdict is Verdict.PASSED:
         store.end(run, TaskState.COMPLETED, RunReason.COMPLETED, delivery=verdict.delivery, checks=verdict.checks)
     elif verdict.verdict is Verdict.UNVERIFIABLE:
@@ -747,6 +753,9 @@ async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.E
         actions = store.actions(run.task_id)
         action = next((action for action in actions if action.state is not ActionState.RESULT), None)
         if action is not None:
+            if action.state is ActionState.PENDING and store.latest_input(run.task_id) > action.response_id:
+                store.result(run, action, ToolResult("Skipped because the user added new input", is_error=True))
+                continue
             if not await _advance_action(store, run, role.tools, action, cancel):
                 return
             continue
@@ -764,7 +773,9 @@ async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.E
         if messages is None:
             store.end(run, TaskState.FAILED, RunReason.MODEL_LENGTH, "Context cannot be compacted further within budget")
             return
-        request = ModelRequest(role.system_prompt, messages, role.tools.definitions(), role.model, role.max_tokens)
+        note = role.context_note() if role.context_note else ""
+        instructions = "\n\n".join(filter(None, (role.system_prompt, note)))
+        request = ModelRequest(instructions, messages, role.tools.definitions(), role.model, role.max_tokens)
         request_id = store.begin(run, "model_calls", "model_started", model=role.model, max_tokens=role.max_tokens)
         if request_id is None:
             _budget_wait(store, run, "model calls")
@@ -778,6 +789,8 @@ async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.E
         if cancel.is_set() or store.task(run.task_id).state is not TaskState.RUNNING:
             return
         store.model_response(run, request_id, response.stop_reason.value, response.text, calls, response.usage, response.error)
+        if store.latest_input(run.task_id) > request_id:
+            continue
         if response.stop_reason is ModelStop.ERROR:
             store.end(run, TaskState.FAILED, RunReason.MODEL_ERROR, response.error or "Model request failed")
             return
