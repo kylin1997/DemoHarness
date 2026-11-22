@@ -47,7 +47,7 @@ async def run(root: Path, live: bool):
         complete = make_openai_stream_fn(key, base_url)
 
     definition = AgentDefinition("demo", project, model, complete)
-    async with AgentRuntime.open(root / "state", [definition]) as runtime:
+    async with AgentRuntime.open(root / "state", [definition], observe=False) as runtime:
         agent = runtime.agent("demo")
         receipt = await agent.submit(
             f"创建 report.md，内容必须逐字等于 {CONTENT!r}。",

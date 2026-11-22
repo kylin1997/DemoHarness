@@ -39,7 +39,7 @@ def _definitions(args) -> list[AgentDefinition]:
                              for name in ("SOUL.md", "AGENTS.md") if (root / name).is_file())
         definitions.append(AgentDefinition(
             agent_id, config_root / config["project"], config.get("model", model), complete,
-            system_prompt=prompt,
+            system_prompt=prompt, proactive_writes=config.get("proactive_writes", False),
         ))
     return definitions
 
@@ -87,7 +87,8 @@ async def _chat(args):
                         break
                     if command == "/help":
                         print("/agent ID · /tasks · /show TASK · /history TASK · /tell TASK MESSAGE · "
-                              "/stop TASK · /resume TASK · /exit", flush=True)
+                              "/stop TASK · /resume TASK · /memory · /remember TEXT · "
+                              "/correct ID VERSION TEXT · /forget ID · /exit", flush=True)
                     elif command == "/agent":
                         agent = runtime.agent(value)
                     elif command == "/tasks":
@@ -103,6 +104,15 @@ async def _chat(args):
                         await agent.stop(value)
                     elif command == "/resume":
                         await agent.resume(value)
+                    elif command == "/memory":
+                        _show([asdict(memory) for memory in agent.memories()])
+                    elif command == "/remember":
+                        _show([asdict(memory) for memory in agent.remember(value)])
+                    elif command == "/correct":
+                        memory_id, version, content = value.split(maxsplit=2)
+                        _show(asdict(agent.correct_memory(int(memory_id), int(version), content)))
+                    elif command == "/forget":
+                        _show({"deleted": agent.delete_memory(int(value))})
                     elif command.startswith("/"):
                         print("未知命令。输入 /help 查看用法。", flush=True)
                     else:

@@ -444,7 +444,7 @@ class TaskStore:
                     model_calls, tool_calls, verifications, compactions
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
                 (task_id, agent_id, str(project), goal, json.dumps([asdict(check) for check in acceptance]),
-                 str(self.root / "workspaces" / task_id), json.dumps(sorted(capabilities)),
+                 str(self.root / "agents" / agent_id / "workspaces" / task_id), json.dumps(sorted(capabilities)),
                  budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions),
             )
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)",

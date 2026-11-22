@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
+import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -68,6 +70,8 @@ from .core.task import (
     stop_reason_of,
 )
 from .core.tools import Tool, ToolRegistry
+from .discovery import ObservationError, observe as observe_project
+from .memory import Memory, MemoryDraft, MemoryStore
 from .tools.files import FILE_CAPABILITIES, FileTools, Workspace, WorkspaceError
 from .tools.planning import PlanningTools
 
@@ -569,10 +573,11 @@ class AgentDefinition:
     capabilities: frozenset[str] = FILE_CAPABILITIES
     max_tokens: int | None = None
     context_messages: int = 16
+    proactive_writes: bool = False
 
     def __post_init__(self) -> None:
-        if not self.id or not self.model:
-            raise ValueError("An Agent needs an id and a model")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", self.id) or not self.model:
+            raise ValueError("An Agent needs a simple id and a model")
         if self.context_messages <= 0 or self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("Context and output limits must be positive")
         capabilities = frozenset(self.capabilities)
@@ -584,7 +589,7 @@ class AgentDefinition:
     @property
     def version(self) -> str:
         definition = [self.id, str(self.project), self.model, self.system_prompt,
-                      sorted(self.capabilities), self.max_tokens, self.context_messages]
+                      sorted(self.capabilities), self.max_tokens, self.context_messages, self.proactive_writes]
         return hashlib.sha256(json.dumps(definition).encode()).hexdigest()
 
 
@@ -602,12 +607,19 @@ class AgentRuntime:
         self._definitions = definitions
         self._workers: dict[str, _Worker] = {}
         self._coordination = CoordinationLog(store.db)
+        store.db.execute("PRAGMA secure_delete = ON")
+        self._memory = MemoryStore(store.db)
         self._coordinators: dict[str, asyncio.Task] = {}
+        self._observers: list[asyncio.Task] = []
+        self._learners: set[asyncio.Task] = set()
         self._closing = False
 
     @classmethod
     @asynccontextmanager
-    async def open(cls, state_dir: str | Path, agents: Iterable[AgentDefinition], *, observe: bool = True):
+    async def open(cls, state_dir: str | Path, agents: Iterable[AgentDefinition], *, observe: bool = True,
+                   observe_interval: float = 5.0):
+        if observe_interval <= 0:
+            raise ValueError("Observation interval must be positive")
         root = Path(state_dir).resolve()
         definitions = {}
         for definition in agents:
@@ -621,6 +633,10 @@ class AgentRuntime:
             runtime._store.recover()
             for definition in definitions.values():
                 runtime._schedule_coordinator(definition)
+                runtime._memory.maintain(definition.id)
+                runtime._schedule_learning(definition)
+                if observe and (Path(definition.project) / ".git").exists():
+                    runtime._observers.append(asyncio.create_task(runtime._observe(definition, observe_interval)))
                 for task_id in runtime._store.queued(definition.id):
                     runtime._schedule(definition, task_id)
             yield runtime
@@ -635,6 +651,66 @@ class AgentRuntime:
         if not self._closing and (job is None or job.done()):
             self._coordinators[definition.id] = asyncio.create_task(self._coordinate(definition))
 
+    async def _observe(self, definition: AgentDefinition, interval: float) -> None:
+        aid = definition.id
+        project = Path(definition.project)
+        prefix = "observation:" + hashlib.sha256(str(project).encode()).hexdigest()[:16] + ":"
+        previous_error = None
+        previous_revision = self._coordination.revision(aid, prefix)
+        while not self._closing:
+            try:
+                current = await observe_project(project, previous_revision)
+            except ObservationError as error:
+                if str(error) != previous_error:
+                    previous_error = str(error)
+                    with self._store.db:
+                        self._coordination.notice(aid, "blocked", f"项目观察暂不可用：{error}")
+            else:
+                previous_error = None
+                if current:
+                    self._coordination.receive(aid, prefix + current.revision, current.evidence,
+                                               revision=current.revision)
+                    previous_revision = current.revision
+                    self._schedule_coordinator(definition)
+            await asyncio.sleep(interval)
+
+    def _schedule_learning(self, definition: AgentDefinition, task_id: str | None = None) -> None:
+        job = asyncio.create_task(self._learn(definition, task_id))
+        self._learners.add(job)
+        job.add_done_callback(self._learners.discard)
+
+    async def _learn(self, definition: AgentDefinition, task_id: str | None) -> None:
+        aid = definition.id
+        for candidate_id in (task_id,) if task_id else self._store.task_ids(aid):
+            await asyncio.sleep(0)
+            task = self._store.task(candidate_id)
+            if task.project != definition.project:
+                continue
+            project = str(task.project)
+            actions = {action.id: action for action in self._store.actions(task.id)}
+            for entry in self._store.history(task.id):
+                checks = entry.data.get("checks", ()) if entry.kind == "completed" else ()
+                if entry.kind == "action_result":
+                    action = actions.get(entry.data.get("action_id"))
+                    if action and action.call.name == "run_check" and action.result and not action.result.is_error:
+                        checks = (action.result.details or {},)
+                if not checks:
+                    continue
+                source = f"task:{task.id}:entry:{entry.id}"
+                if self._memory.processed(aid, project, source):
+                    continue
+                drafts = [MemoryDraft(
+                    "experience", f"check:{check['id']}",
+                    f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。",
+                    (source,), evidence="verified", valid_until=time.time() + 30 * 86400,
+                ) for check in checks if check.get("verdict") == "passed"]
+                self._memory.record(aid, project, source, drafts)
+
+    def _recall(self, definition: AgentDefinition, query: str) -> list[str]:
+        memories = self._memory.recall(definition.id, str(definition.project), query)
+        return [f"{memory.text} [来源 {', '.join(memory.sources)}，更新时间 {memory.updated_at:.0f}]"
+                for memory in memories]
+
     async def _coordinate(self, definition: AgentDefinition) -> None:
         aid = definition.id
         while not self._closing and (message := self._coordination.next(aid)) is not None:
@@ -646,7 +722,8 @@ class AgentRuntime:
                         definition.complete, definition.model, definition.system_prompt,
                         text=message.text,
                         tasks=[{"id": t.id, "goal": t.goal, "state": t.state} for t in tasks],
-                        conversation=self._coordination.conversation(aid), memories=[], reply_to=message.reply_to,
+                        conversation=self._coordination.conversation(aid),
+                        memories=self._recall(definition, message.text), reply_to=message.reply_to,
                         observation=message.revision is not None, cancel=asyncio.Event(),
                     )
                     self._coordination.decided(aid, message.id, decision)
@@ -669,7 +746,7 @@ class AgentRuntime:
             receipt = self._store.follow_up(task, message.id, message.text, observed=observed)
         elif decision.kind == "create":
             capabilities = definition.capabilities
-            if observed:
+            if observed and not definition.proactive_writes:
                 capabilities &= frozenset({"read_file", "run_check"})
             receipt = self._store.submit(
                 aid, Path(definition.project), decision.text, _checks(FileCheck(**check) for check in decision.checks),
@@ -729,7 +806,7 @@ class AgentRuntime:
             role = LoopRole(
                 definition.complete, definition.model, _task_prompt(definition, task), file_tools,
                 lambda text: _finish_file_task(file_tools, task, text), definition.max_tokens, definition.context_messages,
-                context_note=lambda: "Current Plan: " + json.dumps(asdict(store.task(task_id).plan), ensure_ascii=False),
+                context_note=lambda: self._task_context(definition, task_id),
             )
             await run_loop(store, run, role, cancel)
         except asyncio.CancelledError:
@@ -741,6 +818,15 @@ class AgentRuntime:
         finally:
             if cancel.is_set():
                 store.end(run, TaskState.QUEUED, RunReason.PAUSED, "Host shutdown paused the Task")
+            self._schedule_learning(definition, task_id)
+
+    def _task_context(self, definition: AgentDefinition, task_id: str) -> str:
+        task = self._store.task(task_id)
+        last_input = next((entry.data["text"] for entry in reversed(self._store.history(task_id))
+                           if entry.kind == "input"), "")
+        memories = self._recall(definition, task.goal + " " + last_input)
+        plan = json.dumps(asdict(task.plan), ensure_ascii=False)
+        return f"Current Plan: {plan}\nRelevant Agent memories (context only): " + "\n".join(memories)
 
     async def _wait(self, task_id: str) -> None:
         worker = self._workers.get(task_id)
@@ -749,7 +835,7 @@ class AgentRuntime:
 
     async def _close(self) -> None:
         self._closing = True
-        coordinators = list(self._coordinators.values())
+        coordinators = [*self._coordinators.values(), *self._observers]
         for job in coordinators:
             job.cancel()
         await asyncio.gather(*coordinators, return_exceptions=True)
@@ -761,6 +847,7 @@ class AgentRuntime:
             jobs.append(worker.job)
         try:
             await asyncio.gather(*jobs)
+            await asyncio.gather(*self._learners)
         finally:
             self._store.close()
 
@@ -773,6 +860,10 @@ class Agent:
     @property
     def id(self) -> str:
         return self.definition.id
+
+    @property
+    def root(self) -> Path:
+        return self._runtime._store.root / "agents" / self.id
 
     async def submit(
         self, goal: str, *, acceptance: Iterable[FileCheck] = (), budget: Budget | None = None,
@@ -824,6 +915,24 @@ class Agent:
                 after = notice.id
                 yield notice
             await asyncio.sleep(0.1)
+
+    def remember(self, text: str, *, key: str | None = None) -> list[Memory]:
+        source = "user:" + uuid4().hex
+        key = key or "preference:" + hashlib.sha256(text.strip().casefold().encode()).hexdigest()[:16]
+        return self._runtime._memory.record(self.id, None, source, [
+            MemoryDraft("preference", key, text.strip(), (source,), evidence="explicit"),
+        ])
+
+    def memories(self) -> list[Memory]:
+        return self._runtime._memory.list(self.id)
+
+    def correct_memory(self, memory_id: int, version: int, text: str) -> Memory:
+        return self._runtime._memory.correct(self.id, memory_id, version, text, ("user:" + uuid4().hex,))
+
+    def delete_memory(self, memory_id: int) -> bool:
+        deleted = self._runtime._memory.delete(self.id, memory_id)
+        self._runtime._store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return deleted
 
     def task(self, task_id: str) -> Task:
         task = self._runtime._store.task(task_id)

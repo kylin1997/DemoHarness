@@ -70,7 +70,7 @@ def test_file_task_corrects_failed_acceptance_and_delivers_worktree(repo, tmp_pa
 
     async def scenario():
         definition = AgentDefinition("a", repo, "scripted", script)
-        async with AgentRuntime.open(tmp_path / "state", [definition]) as runtime:
+        async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
             agent = runtime.agent("a")
             receipt = await agent.submit(
                 "Create nested/out.py",
@@ -135,7 +135,7 @@ async def model(request, cancel):
     }])
 
 async def run():
-    async with AgentRuntime.open(sys.argv[1], [AgentDefinition("a", sys.argv[2], "scripted", model)]) as runtime:
+    async with AgentRuntime.open(sys.argv[1], [AgentDefinition("a", sys.argv[2], "scripted", model)], observe=False) as runtime:
         agent = runtime.agent("a")
         receipt = await agent.submit("Write crash.py", acceptance=[FileCheck("crash.py", equals="value = 7\\n")],
                                      budget=Budget(model_calls=2, tool_calls=int(sys.argv[5])))
@@ -179,7 +179,7 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
     )
     assert process.returncode == -9, process.stderr
     task_id = receipt_path.read_text()
-    output = state / "workspaces" / task_id / "crash.py"
+    output = state / "agents" / "a" / "workspaces" / task_id / "crash.py"
     if ending == "before":
         assert not output.exists()
     else:
@@ -191,7 +191,7 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
 
     async def reopen():
         definition = AgentDefinition("a", repo, "scripted", script)
-        async with AgentRuntime.open(state, [definition]) as runtime:
+        async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("a")
             task = await agent.wait(task_id)
             old, recovered = agent.runs(task_id)
@@ -230,7 +230,7 @@ def test_real_process_crash_reconciles_write_and_budget(repo, tmp_path, ending):
                 assert task.budget.model_calls == 0
                 assert output.read_text() == "value = 7\n"
         if ending == "unknown":
-            async with AgentRuntime.open(state, [definition]) as runtime:
+            async with AgentRuntime.open(state, [definition], observe=False) as runtime:
                 agent = runtime.agent("a")
                 assert (await agent.wait(task_id)).state is TaskState.WAITING
                 assert len(agent.runs(task_id)) == 2
@@ -267,7 +267,7 @@ def test_budget_blocks_second_tool_then_resumes_same_call_batch(repo, tmp_path):
     async def scenario():
         definition = AgentDefinition("a", repo, "scripted", script)
         state = tmp_path / "state"
-        async with AgentRuntime.open(state, [definition]) as runtime:
+        async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("a")
             receipt = await agent.submit(
                 "Write one.py and two.py",
@@ -284,7 +284,7 @@ def test_budget_blocks_second_tool_then_resumes_same_call_batch(repo, tmp_path):
                 ActionState.PENDING,
             ]
             assert len(script.requests) == 1
-        async with AgentRuntime.open(state, [definition]) as runtime:
+        async with AgentRuntime.open(state, [definition], observe=False) as runtime:
             agent = runtime.agent("a")
             assert (await agent.resume(task.id)).state is TaskState.WAITING
             assert len(script.requests) == 1
@@ -331,7 +331,7 @@ def test_distinct_stopped_failed_and_model_budget_states_persist(repo, tmp_path)
         failed_definition = AgentDefinition("b", repo, "scripted", failure)
         zero_definition = AgentDefinition("c", repo, "scripted", zero)
         async with AgentRuntime.open(
-            state, [stopped_definition, failed_definition, zero_definition]
+            state, [stopped_definition, failed_definition, zero_definition], observe=False
         ) as runtime:
             a, b, c = (runtime.agent(name) for name in "abc")
             stopped = await a.submit(
@@ -363,7 +363,7 @@ def test_distinct_stopped_failed_and_model_budget_states_persist(repo, tmp_path)
         assert not zero.requests
         replacement = Script(done())
         async with AgentRuntime.open(
-            state, [AgentDefinition("a", repo, "scripted", replacement)]
+            state, [AgentDefinition("a", repo, "scripted", replacement)], observe=False
         ) as runtime:
             a = runtime.agent("a")
             assert (await a.wait(stopped.task_id)).state is TaskState.STOPPED
@@ -415,7 +415,7 @@ def test_workspace_paths_and_tools_are_enforced_in_plain_project(tmp_path):
     async def scenario():
         definition = AgentDefinition("a", project, "scripted", script)
         # A state directory inside a plain project is excluded from the snapshot.
-        async with AgentRuntime.open(project / "state", [definition]) as runtime:
+        async with AgentRuntime.open(project / "state", [definition], observe=False) as runtime:
             a = runtime.agent("a")
             receipt = await a.submit(
                 "Write Python safely",
@@ -459,7 +459,7 @@ def test_compaction_keeps_full_recent_tool_groups_and_original_history(repo, tmp
         definition = AgentDefinition(
             "a", repo, "scripted", script, max_tokens=100, context_messages=3
         )
-        async with AgentRuntime.open(tmp_path / "state", [definition]) as runtime:
+        async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
             a = runtime.agent("a")
             receipt = await a.submit(
                 "Read and verify source",

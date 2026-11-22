@@ -178,11 +178,11 @@ class CoordinationLog:
     def finish(self, agent_id: str, message_id: str) -> None:
         self.db.execute("UPDATE coordination SET done = 1 WHERE agent_id = ? AND id = ?", (agent_id, message_id))
 
-    def revision(self, agent_id: str) -> str | None:
+    def revision(self, agent_id: str, prefix: str) -> str | None:
         row = self.db.execute("""
-            SELECT revision FROM coordination WHERE agent_id = ? AND revision IS NOT NULL
+            SELECT revision FROM coordination WHERE agent_id = ? AND revision IS NOT NULL AND id LIKE ?
             ORDER BY seq DESC LIMIT 1
-        """, (agent_id,)).fetchone()
+        """, (agent_id, prefix + "%")).fetchone()
         return row[0] if row else None
 
     def task_for_work(self, agent_id: str, key: str) -> str | None:
