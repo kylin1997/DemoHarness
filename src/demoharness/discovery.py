@@ -9,9 +9,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .core.git import PATCH_OPTIONS, change_fingerprint
+
 _GIT_TIMEOUT = 5.0
 _PATH_BYTES = 4_096
 _TEXT_BYTES = 12_288
+_TRUNCATED = "\n[output truncated]\n"
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
@@ -20,6 +23,7 @@ class Observation:
     revision: str
     base_revision: str | None
     evidence: str
+    change_fingerprint: str | None = None
 
 
 class ObservationError(RuntimeError):
@@ -70,12 +74,7 @@ async def observe(repo: Path, previous_revision: str | None) -> Observation | No
                 "diff-tree",
                 "--no-commit-id",
                 "-r",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--no-relative",
-                "--no-color",
-                "--ignore-submodules=all",
+                *PATCH_OPTIONS,
                 f"-O{os.devnull}",
             )
             paths = await _git(
@@ -92,8 +91,6 @@ async def observe(repo: Path, previous_revision: str | None) -> Observation | No
                 repo,
                 *args,
                 "--patch",
-                "--unified=2",
-                "--full-index",
                 previous_revision,
                 revision,
                 "--",
@@ -101,7 +98,8 @@ async def observe(repo: Path, previous_revision: str | None) -> Observation | No
                 attributes=revision,
             )
             evidence = f"Changed paths\n{paths}\nCommitted diff\n{patch}"
-            return Observation(revision, previous_revision, evidence)
+            fingerprint = None if patch.endswith(_TRUNCATED) else change_fingerprint(patch)
+            return Observation(revision, previous_revision, evidence, fingerprint)
 
     paths = await _git(
         repo,
@@ -184,7 +182,7 @@ async def _git(
                 "-c",
                 f"core.attributesFile={os.devnull}",
                 "-c",
-                "core.quotePath=false",
+                "core.quotePath=true",
                 command,
                 *args,
                 env=env,
@@ -198,7 +196,7 @@ async def _git(
                 output = await process.stdout.readexactly(max_bytes + 1)
                 return (
                     output[:max_bytes].decode("utf-8", "replace")
-                    + "\n[output truncated]\n"
+                    + _TRUNCATED
                 )
             except asyncio.IncompleteReadError as end:
                 status = await process.wait()

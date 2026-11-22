@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from ..core.blocking import run_io
+from ..core.git import PATCH_OPTIONS
 from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict
 from ..core.tools import (
     ReplayPolicy,
@@ -50,7 +51,8 @@ def _relative(path: str) -> tuple[str, ...]:
     return parts
 
 
-def _git(root: Path, lock_fd: int, *args: str, allowed: tuple[int, ...] = (0,)) -> str:
+def _git(root: Path, lock_fd: int, *args: str, allowed: tuple[int, ...] = (0,),
+         errors: str = "replace") -> str:
     env = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
     }
@@ -72,7 +74,7 @@ def _git(root: Path, lock_fd: int, *args: str, allowed: tuple[int, ...] = (0,)) 
         "-c",
         "core.autocrlf=false",
         "-c",
-        "core.quotePath=false",
+        "core.quotePath=true",
     ]
 
     def run(arguments: tuple[str, ...]) -> subprocess.CompletedProcess:
@@ -82,7 +84,7 @@ def _git(root: Path, lock_fd: int, *args: str, allowed: tuple[int, ...] = (0,)) 
             env=env,
             capture_output=True,
             encoding="utf-8",
-            errors="replace",
+            errors=errors,
             timeout=30,
             pass_fds=(lock_fd,),
         )
@@ -303,13 +305,11 @@ class Workspace:
                 self.root,
                 self.lock_fd,
                 "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
+                *PATCH_OPTIONS,
                 "HEAD",
                 "--",
             )
-            added = _git(self.root, self.lock_fd, "ls-files", "--others", "-z")
+            added = _git(self.root, self.lock_fd, "ls-files", "--others", "-z", errors="surrogateescape")
             for path in added.split("\0"):
                 if path:
                     diff += _git(
@@ -317,8 +317,7 @@ class Workspace:
                         self.lock_fd,
                         "diff",
                         "--no-index",
-                        "--no-ext-diff",
-                        "--no-textconv",
+                        *PATCH_OPTIONS,
                         "--",
                         os.devnull,
                         path,

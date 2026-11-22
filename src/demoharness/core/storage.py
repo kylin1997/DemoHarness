@@ -430,6 +430,18 @@ class TaskStore:
         finally:
             self._lock.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.db.execute("SAVEPOINT task_write")
+        try:
+            yield
+            self.db.execute("RELEASE task_write")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK TO task_write")
+                self.db.execute("RELEASE task_write")
+            raise
+
     def _entry(self, task_id: str, run_id: str | None, kind: str, **data: Any) -> int:
         return self.db.execute(
             "INSERT INTO entries(task_id, run_id, kind, data) VALUES (?, ?, ?, ?)",
@@ -445,7 +457,7 @@ class TaskStore:
         if previous:
             return InputReceipt(previous.id, previous.task_id)
         task_id = uuid4().hex
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 """INSERT INTO tasks (
                     id, agent_id, project, goal, acceptance, workspace, capabilities, state,
@@ -472,7 +484,7 @@ class TaskStore:
             if previous.task_id != task.id:
                 raise ValueError("This input is already attached to another Task")
             return InputReceipt(input_id, task.id)
-        with self.db:
+        with self.transaction():
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
             self._entry(task.id, None, "input", input_id=input_id)
             if goal is not None and not observed:
@@ -499,6 +511,15 @@ class TaskStore:
         rows = self.db.execute("SELECT id FROM tasks WHERE agent_id = ? ORDER BY rowid DESC", (agent_id,))
         return [row[0] for row in rows]
 
+    def delivered_task(self, agent_id: str, project: Path, fingerprint: str) -> str | None:
+        row = self.db.execute("""
+            SELECT e.task_id FROM entries e JOIN tasks t ON t.id = e.task_id
+            WHERE t.agent_id = ? AND t.project = ? AND e.kind = 'completed'
+                AND json_extract(e.data, '$.delivery.change_fingerprint') = ?
+            ORDER BY e.id DESC LIMIT 1
+        """, (agent_id, str(project), fingerprint)).fetchone()
+        return row[0] if row else None
+
     def latest_input(self, task_id: str) -> int:
         return self.db.execute("SELECT COALESCE(MAX(id), 0) FROM entries WHERE task_id = ? AND run_id IS NULL AND kind = 'input'",
                                (task_id,)).fetchone()[0]
@@ -521,7 +542,7 @@ class TaskStore:
         delivery = json.loads(row["delivery"]) if row["delivery"] else None
         if delivery:
             checks = tuple(_check_evidence(check) for check in delivery["checks"])
-            delivery = Delivery(delivery["text"], checks, delivery["diff"])
+            delivery = Delivery(delivery["text"], checks, delivery["diff"], delivery.get("change_fingerprint"))
         plan_row = self.db.execute("SELECT plan FROM task_plans WHERE task_id = ?", (task_id,)).fetchone()
         return Task(
             id=row["id"], agent_id=row["agent_id"], project=Path(row["project"]), goal=row["goal"],

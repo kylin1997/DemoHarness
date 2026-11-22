@@ -1,8 +1,12 @@
 import asyncio
 import json
+import sqlite3
 import subprocess
 
+import pytest
+
 from demoharness import AgentDefinition, AgentRuntime, FileCheck, TaskState
+from demoharness.coordination import Route
 from demoharness.core.loop import ModelResponse, ModelStop
 
 
@@ -104,5 +108,71 @@ def test_repo_change_is_discovered_by_default_and_same_work_is_linked(tmp_path):
             await asyncio.sleep(0.12)
             assert len(observations) == 3
             assert [t.id for t in runtime.agent("demo").tasks()] == [task.id]
+
+    asyncio.run(exercise())
+
+
+def test_observation_route_rolls_back_and_can_be_replayed(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+
+    async def complete(request, cancel):
+        raise AssertionError("The test applies the selected route")
+
+    async def exercise():
+        definition = AgentDefinition("demo", project, "scripted", complete)
+        async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
+            agent = runtime.agent("demo")
+            log = runtime._coordination
+            db = runtime._store.db
+            route = Route("create", "Inspect notes", work_key="notes.txt:todo")
+            work_key = f"{project}:{route.work_key}"
+
+            def fail_disposition():
+                db.execute("""
+                    CREATE TRIGGER reject_disposition BEFORE UPDATE OF decision ON coordination
+                    BEGIN SELECT RAISE(ABORT, 'test write failure'); END
+                """)
+
+            log.receive(agent.id, "first", "Initial issue", revision="1" * 40)
+            first = log.next(agent.id)
+            fail_disposition()
+            with pytest.raises(sqlite3.IntegrityError):
+                runtime._apply_route(definition, first, route)
+            assert agent.tasks() == []
+            with pytest.raises(KeyError):
+                agent.input(first.id)
+            assert log.next(agent.id) == first
+            assert log.task_for_work(agent.id, work_key) is None
+            assert log.notices(agent.id, 0) == []
+
+            db.execute("DROP TRIGGER reject_disposition")
+            runtime._apply_route(definition, first, route)
+            runtime._apply_route(definition, first, route)
+            task, = agent.tasks()
+            assert agent.input(first.id).task_id == log.task_for_work(agent.id, work_key) == task.id
+            assert [notice.kind for notice in log.notices(agent.id, 0)] == ["discovered"]
+            assert log.next(agent.id) is None
+            runtime._store.stop(task.id)
+
+            log.receive(agent.id, "next", "Reproduced issue", revision="2" * 40)
+            next_message = log.next(agent.id)
+            fail_disposition()
+            with pytest.raises(sqlite3.IntegrityError):
+                runtime._apply_route(definition, next_message, route)
+            with pytest.raises(KeyError):
+                agent.input(next_message.id)
+            assert log.next(agent.id) == next_message
+            assert [notice.kind for notice in log.notices(agent.id, 0)] == ["discovered", "stopped"]
+
+            db.execute("DROP TRIGGER reject_disposition")
+            runtime._apply_route(definition, next_message, route)
+            runtime._apply_route(definition, next_message, route)
+            assert agent.input(next_message.id).task_id == task.id
+            assert [entry.kind for entry in agent.history(task.id)].count("input") == 2
+            assert [notice.kind for notice in log.notices(agent.id, 0)] == ["discovered", "stopped", "associated"]
+            assert agent.task(task.id).state is TaskState.STOPPED
+            assert agent.runs(task.id) == []
+            assert log.next(agent.id) is None
 
     asyncio.run(exercise())

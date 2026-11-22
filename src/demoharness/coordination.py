@@ -105,6 +105,7 @@ class Message:
     reply_to: str | None
     revision: str | None
     decision: Route | None
+    change_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,7 @@ class CoordinationLog:
                 seq INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, id TEXT NOT NULL,
                 text TEXT NOT NULL, reply_to TEXT, revision TEXT,
                 decision TEXT, done INTEGER NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0, change_fingerprint TEXT,
                 UNIQUE(agent_id, id)
             );
             CREATE TABLE IF NOT EXISTS discovery_work (
@@ -132,17 +133,21 @@ class CoordinationLog:
                 PRIMARY KEY(agent_id, work_key)
             );
         """)
-        if "attempts" not in {row[1] for row in db.execute("PRAGMA table_info(coordination)")}:
-            with db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(coordination)")}
+        with db:
+            if "attempts" not in columns:
                 db.execute("ALTER TABLE coordination ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            if "change_fingerprint" not in columns:
+                db.execute("ALTER TABLE coordination ADD COLUMN change_fingerprint TEXT")
 
     def receive(self, agent_id: str, message_id: str, text: str, *,
-                reply_to: str | None = None, revision: str | None = None) -> bool:
+                reply_to: str | None = None, revision: str | None = None,
+                change_fingerprint: str | None = None) -> bool:
         with self.db:
             added = self.db.execute("""
-                INSERT OR IGNORE INTO coordination(agent_id, id, text, reply_to, revision)
-                VALUES (?, ?, ?, ?, ?)
-            """, (agent_id, message_id, text, reply_to, revision)).rowcount
+                INSERT OR IGNORE INTO coordination(agent_id, id, text, reply_to, revision, change_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (agent_id, message_id, text, reply_to, revision, change_fingerprint)).rowcount
             if added and revision is None:
                 self.notice(agent_id, "received", "已接收。", message_id=message_id)
         return bool(added)
@@ -162,13 +167,13 @@ class CoordinationLog:
 
     def next(self, agent_id: str) -> Message | None:
         row = self.db.execute("""
-            SELECT id, text, reply_to, revision, decision FROM coordination
+            SELECT id, text, reply_to, revision, decision, change_fingerprint FROM coordination
             WHERE agent_id = ? AND done = 0 ORDER BY seq LIMIT 1
         """, (agent_id,)).fetchone()
         if row is None:
             return None
         decision = Route(**json.loads(row[4])) if row[4] else None
-        return Message(*row[:4], decision)
+        return Message(*row[:4], decision, row[5])
 
     def conversation(self, agent_id: str) -> list[dict]:
         rows = self.db.execute("""
@@ -179,13 +184,16 @@ class CoordinationLog:
         return [{"id": row[0], "text": row[1], "decision": json.loads(row[2]) if row[2] else None}
                 for row in reversed(rows)]
 
-    def decided(self, agent_id: str, message_id: str, decision: Route) -> None:
-        with self.db:
-            self.db.execute("UPDATE coordination SET decision = ? WHERE agent_id = ? AND id = ?",
-                            (json.dumps(vars(decision), ensure_ascii=False), agent_id, message_id))
+    def pending(self, agent_id: str, message_id: str) -> bool:
+        return self.db.execute("SELECT 1 FROM coordination WHERE agent_id = ? AND id = ? AND done = 0",
+                               (agent_id, message_id)).fetchone() is not None
 
-    def finish(self, agent_id: str, message_id: str) -> None:
-        self.db.execute("UPDATE coordination SET done = 1 WHERE agent_id = ? AND id = ?", (agent_id, message_id))
+    def finish(self, agent_id: str, message_id: str, decision: Route | None = None) -> None:
+        data = json.dumps(vars(decision), ensure_ascii=False) if decision is not None else None
+        self.db.execute("""
+            UPDATE coordination SET done = 1, decision = COALESCE(?, decision)
+            WHERE agent_id = ? AND id = ?
+        """, (data, agent_id, message_id))
 
     def failed_attempt(self, agent_id: str, message_id: str) -> int:
         with self.db:

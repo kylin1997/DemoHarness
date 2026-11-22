@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import subprocess
@@ -8,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from demoharness import discovery
+from demoharness import AgentDefinition, AgentRuntime, FileCheck, TaskState, discovery
+from demoharness.core.loop import ModelResponse, ModelStop
 from demoharness.discovery import ObservationError, observe
 
 
@@ -203,3 +205,92 @@ def test_stalled_git_read_returns_observation_error(repo, monkeypatch):
 
     with pytest.raises(ObservationError, match="timed out"):
         asyncio.run(observe(repo, None))
+
+
+def test_observation_links_a_delivered_change_and_routes_any_extra_changes(repo, tmp_path):
+    (repo / "notes.txt").write_text("Initial notes\n")
+    (repo / "obsolete.txt").write_text("Keep until reviewed\n")
+    _commit(repo, "Initial snapshot")
+    observations = asyncio.Queue()
+    writes = [
+        {
+            "call_id": "new", "name": "write_file",
+            "params": {"path": "artifact.txt", "content": "Delivered\n"},
+        },
+        {
+            "call_id": "edit", "name": "write_file",
+            "params": {"path": "notes.txt", "content": "Updated notes\n"},
+        },
+    ]
+
+    async def complete(request, cancel):
+        if "你负责判断消息属于哪件事" in request.system_prompt:
+            observations.put_nowait(json.loads(request.messages[-1]["content"])["text"])
+            return ModelResponse(ModelStop.OK, '{"kind":"skip"}')
+        if writes:
+            pending = writes[:]
+            writes.clear()
+            return ModelResponse(ModelStop.OK, "", pending)
+        return ModelResponse(ModelStop.OK, "Delivered")
+
+    def apply_delivery():
+        (repo / "artifact.txt").write_text("Delivered\n")
+        (repo / "notes.txt").write_text("Updated notes\n")
+
+    def undo_delivery():
+        (repo / "artifact.txt").unlink()
+        (repo / "notes.txt").write_text("Initial notes\n")
+        (repo / "obsolete.txt").write_text("Keep until reviewed\n")
+        (repo / "new.txt").unlink(missing_ok=True)
+        _commit(repo, "Restore base files")
+
+    async def exercise():
+        definition = AgentDefinition("demo", repo, "scripted", complete)
+        state = tmp_path / "state"
+        async with AgentRuntime.open(state, [definition], observe_interval=0.02) as runtime:
+            assert "Initial notes" in await asyncio.wait_for(observations.get(), 5)
+            agent = runtime.agent("demo")
+            receipt = await agent.submit("Create artifact.txt and update notes.txt", acceptance=[
+                FileCheck("artifact.txt", equals="Delivered\n"),
+                FileCheck("notes.txt", equals="Updated notes\n"),
+            ])
+            original = await agent.wait(receipt.task_id)
+            assert original.state is TaskState.COMPLETED
+
+        apply_delivery()
+        _commit(repo, "Apply delivered task output")
+        async with AgentRuntime.open(state, [definition], observe_interval=0.02) as runtime:
+            agent = runtime.agent("demo")
+            async with asyncio.timeout(5):
+                async for notice in agent.updates():
+                    if notice.kind == "associated":
+                        assert notice.task_id == original.id
+                        assert "artifact.txt" in agent.input(notice.message_id).text
+                        break
+            assert observations.empty()
+            assert agent.task(original.id).state is TaskState.COMPLETED
+            assert len(agent.runs(original.id)) == 1
+
+            undo_delivery()
+            await asyncio.wait_for(observations.get(), 5)
+            apply_delivery()
+            (repo / "obsolete.txt").unlink()
+            _commit(repo, "Apply delivery and delete an unrelated path")
+            assert "obsolete.txt" in await asyncio.wait_for(observations.get(), 5)
+
+            undo_delivery()
+            await asyncio.wait_for(observations.get(), 5)
+            apply_delivery()
+            (repo / "new.txt").write_text("Unrelated new work\n")
+            _commit(repo, "Apply delivery and add an unrelated path")
+            assert "new.txt" in await asyncio.wait_for(observations.get(), 5)
+
+            undo_delivery()
+            await asyncio.wait_for(observations.get(), 5)
+            apply_delivery()
+            (repo / "artifact.txt").write_text("Delivered\nIndependent addition\n")
+            _commit(repo, "Edit the delivered output")
+            assert "Independent addition" in await asyncio.wait_for(observations.get(), 5)
+            assert [task.id for task in agent.tasks()] == [original.id]
+
+    asyncio.run(exercise())

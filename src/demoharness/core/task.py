@@ -373,6 +373,7 @@ class Delivery:
     text: str
     checks: tuple[CheckEvidence, ...]
     diff: str
+    change_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)

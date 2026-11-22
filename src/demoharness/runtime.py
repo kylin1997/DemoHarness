@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from .coordination import CoordinationLog, Message, Notice, Route, route
 from .core.blocking import run_io
+from .core.git import change_fingerprint
 from .core.loop import LoopRole, RoleResult, StreamFn, run_loop
 from .core.storage import HistoryEntry, TaskStore
 from .core.task import Action, Budget, Delivery, FileCheck, Input, InputReceipt, Run, RunReason, Task, TaskState, Verdict
@@ -132,7 +133,8 @@ class AgentRuntime:
                 previous_error = None
                 if current:
                     self._coordination.receive(aid, prefix + current.revision, current.evidence,
-                                               revision=current.revision)
+                                               revision=current.revision,
+                                               change_fingerprint=current.change_fingerprint)
                     previous_revision = current.revision
                     self._schedule_coordinator(definition)
             await asyncio.sleep(interval)
@@ -166,6 +168,10 @@ class AgentRuntime:
         while not self._closing and (message := self._coordination.next(aid)) is not None:
             try:
                 decision = message.decision
+                if decision is None and message.change_fingerprint:
+                    task_id = self._store.delivered_task(aid, definition.project, message.change_fingerprint)
+                    if task_id:
+                        decision = Route("attach", "项目变更与已有交付一致。", task_id=task_id)
                 if decision is None:
                     tasks = self.agent(aid).tasks()[:20]
                     decision = await route(
@@ -176,7 +182,6 @@ class AgentRuntime:
                         memories=self._recall(definition, message.text), reply_to=message.reply_to,
                         observation=message.revision is not None, cancel=asyncio.Event(),
                     )
-                    self._coordination.decided(aid, message.id, decision)
                 self._apply_route(definition, message, decision)
             except (ValueError, KeyError, TypeError, AttributeError, TimeoutError) as error:
                 if self._coordination.failed_attempt(aid, message.id) < 2:
@@ -190,32 +195,40 @@ class AgentRuntime:
         aid = definition.id
         observed = message.revision is not None
         input_text = f"Project observation (evidence):\n{message.text}" if observed else message.text
-        target = decision.task_id
         work_key = f"{definition.project}:{decision.work_key}" if decision.work_key else None
-        if work_key:
-            target = self._coordination.task_for_work(aid, work_key)
         receipt = None
-        if target:
-            task = self.agent(aid).task(target)
-            checks = _checks(FileCheck(**check) for check in decision.checks) if decision.checks and not observed else None
-            receipt = self._store.follow_up(task, message.id, input_text, observed=observed,
-                                            acceptance=checks, goal=decision.new_goal)
-        elif decision.kind == "create":
-            capabilities = definition.capabilities
-            if observed and not definition.proactive_writes:
-                capabilities &= frozenset({"read_file", "run_check"})
-            receipt = self._store.submit(
-                aid, Path(definition.project), decision.text, _checks(FileCheck(**check) for check in decision.checks),
-                Budget(), capabilities, message.id, input_text, base_commit=message.revision,
-            )
-        with self._store.db:
+        with self._store.transaction():
+            if not self._coordination.pending(aid, message.id):
+                return
+            target = decision.task_id
+            if work_key:
+                target = self._coordination.task_for_work(aid, work_key) or target
+            if target:
+                task = self.agent(aid).task(target)
+                checks = _checks(FileCheck(**check) for check in decision.checks) if decision.checks and not observed else None
+                receipt = self._store.follow_up(task, message.id, input_text, observed=observed,
+                                                acceptance=checks, goal=decision.new_goal)
+                if observed:
+                    self._coordination.notice(aid, "associated", decision.text or "已关联已有 Task。",
+                                              message_id=message.id, task_id=target)
+                    decision = replace(decision, kind="attach", checks=())
+            elif decision.kind == "create":
+                capabilities = definition.capabilities
+                if observed and not definition.proactive_writes:
+                    capabilities &= frozenset({"read_file", "run_check"})
+                receipt = self._store.submit(
+                    aid, Path(definition.project), decision.text, _checks(FileCheck(**check) for check in decision.checks),
+                    Budget(), capabilities, message.id, input_text, base_commit=message.revision,
+                )
             if decision.kind in {"reply", "clarify"}:
                 self._coordination.notice(aid, decision.kind, decision.text, message_id=message.id)
             if receipt and work_key and target is None:
                 self._coordination.remember_work(aid, work_key, receipt.task_id)
                 self._coordination.notice(aid, "discovered", f"发现新工作：{decision.text}",
                                           message_id=message.id, task_id=receipt.task_id)
-            self._coordination.finish(aid, message.id)
+            if receipt:
+                decision = replace(decision, task_id=receipt.task_id)
+            self._coordination.finish(aid, message.id, decision)
         if receipt and self._store.task(receipt.task_id).state is TaskState.QUEUED:
             self._schedule(definition, receipt.task_id)
 
@@ -492,4 +505,5 @@ def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
         diff = tools.workspace.diff()
     except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
         return RoleResult(Verdict.UNVERIFIABLE, f"Cannot collect the workspace diff: {error}", checks)
-    return RoleResult(Verdict.PASSED, checks=checks, delivery=Delivery(text, checks, diff))
+    fingerprint = change_fingerprint(diff) if task.workspace_kind == "git" else None
+    return RoleResult(Verdict.PASSED, checks=checks, delivery=Delivery(text, checks, diff, fingerprint))
