@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .coordination import CoordinationLog, Message, Notice, Route, route
+from .core.blocking import run_io
 from .core.loop import LoopRole, RoleResult, StreamFn, run_loop
 from .core.storage import HistoryEntry, TaskStore
 from .core.task import Action, Budget, Delivery, FileCheck, Input, InputReceipt, Run, RunReason, Task, TaskState, Verdict
@@ -249,14 +250,15 @@ class AgentRuntime:
             workspace = Workspace(task, store.root, store.lock_fd)
             if not task.workspace_ready:
                 if task.workspace_kind is None:
-                    kind, base = workspace.describe()
+                    kind, base = await run_io(workspace.describe)
                     store.workspace_started(run, kind, base)
                     task = store.task(task_id)
                     workspace = Workspace(task, store.root, store.lock_fd)
-                workspace.prepare()
+                await run_io(workspace.prepare)
                 store.workspace_ready(run)
             else:
-                workspace.validate()
+                await run_io(workspace.validate)
+            task = store.task(task_id)
             capabilities = task.capabilities & definition.capabilities
             initial = next((entry.data for entry in store.history(task_id, limit=1) if entry.kind == "input"), {})
             if initial.get("source") == "observation" and not definition.proactive_writes:
@@ -264,7 +266,7 @@ class AgentRuntime:
             file_tools = PlanningTools(workspace, capabilities, task.acceptance, store, run)
             role = LoopRole(
                 definition.complete, definition.model, _task_prompt(definition), file_tools,
-                lambda text: _finish_file_task(file_tools, store.task(task_id), text),
+                lambda text: run_io(_finish_file_task, file_tools, store.task(task_id), text),
                 definition.max_tokens, definition.context_messages,
                 context_note=lambda: self._task_context(definition, task_id, file_tools),
                 after_action=lambda action: self._observe_check(definition, action),

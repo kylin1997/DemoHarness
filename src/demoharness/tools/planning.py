@@ -50,10 +50,10 @@ class PlanningTools(FileTools):
         if not valid:
             raise ToolRejected(reason)
 
-    def reconcile(self, action: Action) -> ToolResult | None:
+    async def reconcile(self, action: Action) -> ToolResult | None:
         if action.call.name in _PLAN_SPECS:
             return None
-        return super().reconcile(action)
+        return await super().reconcile(action)
 
     async def execute(self, action: Action, intent: dict | None, cancel: asyncio.Event) -> ToolResult:
         name, params = action.call.name, action.call.params

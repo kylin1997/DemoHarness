@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
+from ..core.blocking import run_io
 from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict
 from ..core.tools import (
     ReplayPolicy,
@@ -430,20 +431,22 @@ class FileTools:
         if call.name == "run_check" and call.params["recipe_id"] not in self.checks:
             raise ToolRejected(f"Unknown check recipe: {call.params['recipe_id']}")
 
-    def prepare(self, action: Action) -> dict | None:
+    async def prepare(self, action: Action) -> dict | None:
         self.authorize(action)
         if action.call.name == "write_file":
-            params = action.call.params
-            content = params["content"].encode("utf-8")
-            if len(content) > MAX_FILE_BYTES:
-                raise ToolRejected(f"File exceeds {MAX_FILE_BYTES} bytes")
-            return {
-                "before": self.workspace.fingerprint(params["path"]),
-                "after": _sha(content),
-            }
+            return await run_io(self._write_intent, action.call.params)
         return None
 
-    def reconcile(self, action: Action) -> ToolResult | None:
+    def _write_intent(self, params: dict) -> dict:
+        content = params["content"].encode("utf-8")
+        if len(content) > MAX_FILE_BYTES:
+            raise ToolRejected(f"File exceeds {MAX_FILE_BYTES} bytes")
+        return {
+            "before": self.workspace.fingerprint(params["path"]),
+            "after": _sha(content),
+        }
+
+    async def reconcile(self, action: Action) -> ToolResult | None:
         spec = _SPECS.get(action.call.name)
         if spec and spec.replay is ReplayPolicy.SAFE:
             return None
@@ -451,7 +454,7 @@ class FileTools:
             raise UnknownEffect(f"Cannot reconcile {action.call.name} ({action.id})")
         path = action.call.params["path"]
         try:
-            actual = self.workspace.fingerprint(path)
+            actual = await run_io(self.workspace.fingerprint, path)
         except (OSError, WorkspaceError) as error:
             raise UnknownEffect(f"Cannot reconcile {path!r}: {error}") from error
         if actual == action.intent["after"]:
@@ -465,6 +468,9 @@ class FileTools:
     async def execute(
         self, action: Action, intent: dict | None, cancel: asyncio.Event
     ) -> ToolResult:
+        return await run_io(self._execute_file, action, intent)
+
+    def _execute_file(self, action: Action, intent: dict | None) -> ToolResult:
         name, params = action.call.name, action.call.params
         if name == "read_file":
             data = self.workspace.read(params["path"])

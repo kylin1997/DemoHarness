@@ -50,6 +50,10 @@ def _preview(entry: HistoryEntry) -> dict:
     return {**item, "data": entry.data}
 
 
+async def _finish_child(text: str) -> RoleResult:
+    return RoleResult(Verdict.PASSED, delivery=Delivery(text[:1600], (), ""))
+
+
 class _ChildTools(FileTools):
     def __init__(self, store: TaskStore, task_id: str, files: FileTools):
         super().__init__(files.workspace, files.capabilities & {"read_file"}, ())
@@ -65,10 +69,10 @@ class _ChildTools(FileTools):
         else:
             super().authorize(action)
 
-    def reconcile(self, action: Action) -> ToolResult | None:
+    async def reconcile(self, action: Action) -> ToolResult | None:
         if action.call.name == _PARENT_HISTORY.name:
             return None
-        return super().reconcile(action)
+        return await super().reconcile(action)
 
     async def execute(self, action: Action, intent: dict | None, cancel: asyncio.Event) -> ToolResult:
         if action.call.name != _PARENT_HISTORY.name:
@@ -93,7 +97,7 @@ class DelegatingTools:
             tools=_ChildTools(store, parent.task_id, files),
             context_note=None,
             after_action=None,
-            finish=lambda text: RoleResult(Verdict.PASSED, delivery=Delivery(text[:1600], (), "")),
+            finish=_finish_child,
         )
 
     def definitions(self) -> list[ToolSpec]:
@@ -107,16 +111,16 @@ class DelegatingTools:
         else:
             self.tools.authorize(action)
 
-    def prepare(self, action: Action) -> dict | None:
+    async def prepare(self, action: Action) -> dict | None:
         if action.call.name == _DELEGATE.name:
             self.authorize(action)
             return None
-        return self.tools.prepare(action)
+        return await self.tools.prepare(action)
 
-    def reconcile(self, action: Action) -> ToolResult | None:
+    async def reconcile(self, action: Action) -> ToolResult | None:
         if action.call.name == _DELEGATE.name:
             return self._result(action)
-        return self.tools.reconcile(action)
+        return await self.tools.reconcile(action)
 
     async def execute(self, action: Action, intent: dict | None, cancel: asyncio.Event) -> ToolResult:
         if action.call.name != _DELEGATE.name:

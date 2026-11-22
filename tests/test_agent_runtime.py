@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,148 @@ def test_file_task_corrects_failed_acceptance_and_delivers_worktree(repo, tmp_pa
         assert len(script.requests) == 3
         assert "Verification failed" in script.requests[1].messages[-1]["content"]
         assert script.requests[-1].messages[-1]["tool_call_id"] == "write-1"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["worktree", "fingerprint", "verify", "diff"])
+def test_blocked_workspace_io_allows_other_tasks_and_input(repo, tmp_path, monkeypatch, operation):
+    from demoharness import AgentDefinition, AgentRuntime, FileCheck, TaskState
+    from demoharness.tools import files
+
+    entered, release = threading.Event(), threading.Event()
+    slow_workspace = None
+
+    def block():
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5), f"{operation} stalled the event loop"
+
+    git_command = files._git
+    read = files.Workspace.read
+
+    def delayed_git(root, lock_fd, *args, **kwargs):
+        if operation == "worktree" and args[:2] == ("worktree", "add") and str(slow_workspace) in args:
+            block()
+        if operation == "diff" and root == slow_workspace and args[0] == "diff":
+            block()
+        return git_command(root, lock_fd, *args, **kwargs)
+
+    def delayed_read(workspace, path):
+        if workspace.root == slow_workspace and (
+            (operation == "fingerprint" and path == "obsolete.py")
+            or (operation == "verify" and path == "source.py")
+        ):
+            block()
+        return read(workspace, path)
+
+    monkeypatch.setattr(files, "_git", delayed_git)
+    monkeypatch.setattr(files.Workspace, "read", delayed_read)
+
+    async def model(request, cancel):
+        if operation == "fingerprint" and "Current Task goal: Slow\n" in request.system_prompt:
+            return tools(call("obsolete", "write_file", path="obsolete.py", content="obsolete = 1\n"))
+        return done()
+
+    async def scenario():
+        nonlocal slow_workspace
+        definition = AgentDefinition("a", repo, "scripted", model)
+        check = FileCheck("source.py", equals="source = 1\n")
+        updated_check = FileCheck("source.py", contains="source = 1", id="follow-up")
+        async with AgentRuntime.open(tmp_path / "state", [definition], observe=False) as runtime:
+            agent = runtime.agent("a")
+            slow = await agent.submit("Slow", acceptance=[check])
+            slow_workspace = agent.task(slow.task_id).workspace
+            try:
+                async with asyncio.timeout(5):
+                    while not entered.is_set():
+                        await asyncio.sleep(0.01)
+                    assert agent.task(slow.task_id).state is TaskState.RUNNING
+                    follow_up = await agent.send(
+                        "Only check source.py", task_id=slow.task_id, goal="Check existing source",
+                        acceptance=[updated_check],
+                    )
+                    assert agent.input(follow_up).text == "Only check source.py"
+                    fast = await agent.submit("Fast", acceptance=[check])
+                    assert (await agent.wait(fast.task_id)).state is TaskState.COMPLETED
+                    assert agent.task(slow.task_id).state is TaskState.RUNNING
+            finally:
+                release.set()
+            task = await agent.wait(slow.task_id)
+            assert task.state is TaskState.COMPLETED
+            assert task.delivery.checks[0].id == updated_check.id
+            assert task.delivery.checks[0].sha256
+            if operation == "fingerprint":
+                assert agent.actions(task.id)[0].attempts == 0
+                assert not (task.workspace / "obsolete.py").exists()
+            if operation in {"verify", "diff"}:
+                assert any(entry.kind == "verification_superseded" for entry in agent.history(task.id))
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_waits_for_workspace_write_before_releasing_host_lock(repo, tmp_path, monkeypatch):
+    from demoharness import (
+        AgentDefinition,
+        AgentRuntime,
+        Budget,
+        FileCheck,
+        RunReason,
+        TaskState,
+    )
+    from demoharness.core.storage import StorageAlreadyOpen
+    from demoharness.tools.files import Workspace
+
+    entered, release = threading.Event(), threading.Event()
+    write = Workspace.write
+
+    def delayed_write(workspace, path, data, before):
+        write(workspace, path, data, before)
+        entered.set()
+        assert release.wait(5), "write stalled the event loop"
+
+    monkeypatch.setattr(Workspace, "write", delayed_write)
+    script = Script(tools(call("write", "write_file", path="output.py", content="value = 7\n")), done())
+    definition = AgentDefinition("a", repo, "scripted", script)
+    state = tmp_path / "state"
+
+    async def scenario():
+        stopping = asyncio.Event()
+
+        async def start_and_pause():
+            async with AgentRuntime.open(state, [definition], observe=False) as runtime:
+                agent = runtime.agent("a")
+                receipt = await agent.submit(
+                    "Write output.py", acceptance=[FileCheck("output.py", equals="value = 7\n")],
+                    budget=Budget(model_calls=2, tool_calls=1),
+                )
+                async with asyncio.timeout(5):
+                    while not entered.is_set():
+                        await asyncio.sleep(0.01)
+                    assert agent.task(receipt.task_id).state is TaskState.RUNNING
+                stopping.set()
+            return receipt.task_id
+
+        host = asyncio.create_task(start_and_pause())
+        try:
+            async with asyncio.timeout(5):
+                await stopping.wait()
+                finished, _ = await asyncio.wait({host}, timeout=0.05)
+                assert not finished
+                with pytest.raises(StorageAlreadyOpen):
+                    async with AgentRuntime.open(state, [definition], observe=False):
+                        pytest.fail("another host took the lock during an in-flight write")
+        finally:
+            release.set()
+            task_id = await host
+
+        async with AgentRuntime.open(state, [definition], observe=False) as runtime:
+            agent = runtime.agent("a")
+            task = await agent.wait(task_id)
+            assert task.state is TaskState.COMPLETED
+            assert (task.workspace / "output.py").read_text() == "value = 7\n"
+            assert agent.actions(task_id)[0].attempts == 1
+            assert agent.runs(task_id)[0].reason is RunReason.PAUSED
 
     asyncio.run(scenario())
 

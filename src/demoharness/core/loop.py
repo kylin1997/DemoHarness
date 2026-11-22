@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -59,7 +59,7 @@ class LoopRole:
     model: str
     system_prompt: str
     tools: RecoverableTools
-    finish: Callable[[str], RoleResult]
+    finish: Callable[[str], Awaitable[RoleResult]]
     max_tokens: int | None
     context_messages: int
     context_note: Callable[[], str] | None = None
@@ -89,7 +89,7 @@ async def _advance_action(
 ) -> bool:
     try:
         if action.state is ActionState.STARTED:
-            result = tools.reconcile(action)
+            result = await tools.reconcile(action)
             if result is not None:
                 store.result(run, action, result)
                 return True
@@ -99,7 +99,12 @@ async def _advance_action(
             tools.authorize(action)
             intent = action.intent
         else:
-            intent = tools.prepare(action)
+            intent = await tools.prepare(action)
+            if run.delegation_id is None and store.latest_input(run.task_id) > action.response_id:
+                store.result(run, action, ToolResult("Skipped because the user added new input", is_error=True))
+                return True
+        if cancel.is_set():
+            return False
         if not store.start_action(run, action, intent):
             _budget_wait(store, run, "tools")
             return False
@@ -122,12 +127,12 @@ def _proposal(entries: list[HistoryEntry]) -> HistoryEntry | None:
     return None
 
 
-def _verify(store: TaskStore, run: Run, role: LoopRole, proposal: HistoryEntry) -> bool:
+async def _verify(store: TaskStore, run: Run, role: LoopRole, proposal: HistoryEntry) -> bool:
     attempt = store.begin(run, "verifications", "verification_started", proposal_id=proposal.id)
     if attempt is None:
         _budget_wait(store, run, "verification")
         return False
-    verdict = role.finish(proposal.data["text"])
+    verdict = await role.finish(proposal.data["text"])
     if store.task(run.task_id).state is not TaskState.RUNNING:
         return False
     if run.delegation_id is None and store.latest_input(run.task_id) > proposal.id:
@@ -196,7 +201,7 @@ async def run_loop(store: TaskStore, run: Run, role: LoopRole, cancel: asyncio.E
         entries = store.history(run.task_id, delegation_id=run.delegation_id)
         proposal = _proposal(entries)
         if proposal is not None:
-            if not _verify(store, run, role, proposal):
+            if not await _verify(store, run, role, proposal):
                 return
             continue
         if role.model_limit is not None and sum(entry.kind == "model_started" for entry in entries) >= role.model_limit:
