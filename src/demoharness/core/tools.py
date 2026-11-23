@@ -1,15 +1,12 @@
 """共享的工具规格、入参校验和工具结果。
 
 当前执行循环通过 RecoverableTools 控制准备、执行和恢复时的核对。
-ToolRegistry 和批量执行函数服务早期 SDK。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
@@ -19,15 +16,10 @@ if TYPE_CHECKING:
 
 
 class ReplayPolicy(Enum):
-    """中断后该工具是否可安全重放（恢复用，架构不变量 5 的判定依据）。"""
+    """中断后无法核对结果时，该工具动作是否可以安全重放。"""
 
-    NEVER = "never"   # 副作用工具：恢复时物化中断
-    SAFE = "safe"     # 只读工具：可重放（后台任务自动续跑用）
-
-
-class ExecMode(Enum):
-    PARALLEL = "parallel"      # 可与其他工具并发
-    SEQUENTIAL = "sequential"  # 必须串行（批内有它则整批串行）
+    NEVER = "never"
+    SAFE = "safe"
 
 
 @dataclass(frozen=True)
@@ -36,21 +28,11 @@ class ToolSpec:
     description: str
     parameters: dict                 # JSON Schema（手写 dict，零依赖）
     replay: ReplayPolicy = ReplayPolicy.NEVER
-    execution: ExecMode = ExecMode.PARALLEL
-
-
-def is_replay_safe(spec: ToolSpec) -> bool:
-    """恢复/后台续跑的统一判定接口（L2-4 的 ReplayPolicy.SAFE 消费点）。
-
-    本轮冻结接口形状：仅显式声明 SAFE 的工具允许中断后重放；副作用工具
-    一律物化中断（架构不变量 5）。后台任务的自动重排（第 8 步）据此判定。
-    """
-    return spec.replay is ReplayPolicy.SAFE
 
 
 @dataclass(frozen=True)
 class ToolCall:
-    """调用载体：恢复与并发落盘的地基。"""
+    """工具调用的标识、名称和参数。"""
 
     call_id: str
     name: str
@@ -59,39 +41,10 @@ class ToolCall:
 
 @dataclass
 class ToolResult:
-    content: str                  # 模型看到的结果文本（第一阶段仅文本）
-    details: dict | None = None   # 结构化详情（退出码/时长等），落盘不进程上下文
-    is_error: bool = False        # 失败编码，不抛异常
+    content: str                  # 模型看到的结果文本
+    details: dict | None = None   # 结构化详情，保存在 Session 历史中
+    is_error: bool = False
 
-
-@dataclass(frozen=True)
-class BeforeVerdict:
-    """before_tool_call 钩子的裁决：block=True 时 reason 进 content 返回模型。"""
-
-    block: bool
-    reason: str
-
-
-# before_tool_call 契约： (工具名, 实际入参) -> BeforeVerdict | None。
-# None = 放行；block=True = 拦截并把 reason 作为错误结果返回模型（工具不执行）。
-# 多个钩子按装配顺序遍历，第一个 block 即短路；钩子本身不得抛异常给模型。
-BeforeToolHook = Callable[[str, dict], BeforeVerdict | None]
-AfterToolHook = Callable[[ToolResult], ToolResult]
-ToolHooks = BeforeToolHook  # 向后兼容别名（既有代码与测试用此名）
-
-
-class Tool(Protocol):
-    spec: ToolSpec
-
-    async def execute(
-        self,
-        call_id: str,
-        params: dict,
-        cancel: asyncio.Event,
-    ) -> ToolResult: ...
-
-
-# ── 参数校验（手写 JSON Schema 最小子集，零新增依赖） ──
 
 _SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
 
@@ -105,9 +58,7 @@ def validate_params(spec: ToolSpec, params: dict) -> tuple[bool, str]:
     minItems/maxItems）。object/null/anyOf/oneOf/allOf/$ref 等复合 schema
     仍在显式债务内：遇到即给出可读的「不支持」错误，不静默放行。
 
-    设计原因：复合判定放在「实际值」循环内，声明层不预扫描全部属性——
-    声明了数组参数但本次不传的工具（如 delegate_subagent 只传 prompt）必须
-    能到达 execute，这是 L2-5 复合参数链路的根因修法。
+    可选的复合参数只在实际传入时校验。
     """
     schema = spec.parameters or {}
     props = schema.get("properties", {})
@@ -191,126 +142,6 @@ def _validate_array(name: str, value: object, prop: dict) -> tuple[bool, str]:
     if hi is not None and len(value) > hi:
         return False, f"参数 {name} 元素数 {len(value)} 大于上限 {hi}"
     return True, ""
-
-
-def _error(message: str) -> ToolResult:
-    return ToolResult(content=message, is_error=True)
-
-
-# ── 注册表 ──
-
-
-class ToolRegistry:
-    def register(self, tool: Tool) -> None:
-        """装配期调用；重名抛错。"""
-        if tool.spec.name in self._tools:
-            raise ValueError(f"工具重名：{tool.spec.name}")
-        self._tools[tool.spec.name] = tool
-
-    def get(self, name: str) -> Tool | None:
-        return self._tools.get(name)
-
-    def definitions(self) -> list[ToolSpec]:
-        """给 stream_fn 的工具声明清单，按 name 稳定排序（prompt cache 友好）。"""
-        return sorted(
-            (t.spec for t in self._tools.values()), key=lambda s: s.name
-        )
-
-    def __init__(self) -> None:
-        self._tools: dict[str, Tool] = {}
-
-
-# ── 三段式执行管线 ──
-
-
-async def execute_tool_calls(
-    calls: list[ToolCall],
-    registry: ToolRegistry,
-    before_hooks: list[BeforeToolHook] | None = None,
-    after_hooks: list[AfterToolHook] | None = None,
-    cancel: asyncio.Event | None = None,
-) -> list[ToolResult]:
-    """对一批 ToolCall 执行三段式：prepare 串行 → execute → finalize 串行。
-
-    返回与 calls 同序、等长的 ToolResult 列表。任何工具失败都不向上抛，
-    编码为 is_error 结果。
-
-    - prepare 串行：查注册表（未注册→error）→ 参数校验 → before 钩子
-      （block→is_error 结果，reason 进 content）。
-    - execute：并发策略（任一 SEQUENTIAL → 整批串行按原序；全 PARALLEL 才
-      gather）；记录 duration 进 details。
-    - finalize 串行：after 钩子可替换每个 ToolResult。
-    """
-    before_hooks = before_hooks or []
-    after_hooks = after_hooks or []
-    cancel = cancel or asyncio.Event()
-
-    # 1) prepare 串行
-    prepared: list[tuple[ToolCall, ToolResult | None]] = []
-    for call in calls:
-        tool = registry.get(call.name)
-        if tool is None:
-            prepared.append((call, _error(f"工具不存在：{call.name}")))
-            continue
-        ok, reason = validate_params(tool.spec, call.params)
-        if not ok:
-            prepared.append((call, _error(reason)))
-            continue
-        blocked = False
-        for hook in before_hooks:
-            verdict = hook(call.name, call.params)
-            if verdict is not None and verdict.block:
-                prepared.append((call, _error(verdict.reason)))
-                blocked = True
-                break
-        if blocked:
-            continue
-        prepared.append((call, None))
-
-    # 2) execute
-    results: list[ToolResult | None] = [None] * len(calls)
-    for i, (_, pre) in enumerate(prepared):
-        if pre is not None:
-            results[i] = pre
-
-    to_run = [(i, c) for i, (c, _) in enumerate(prepared) if results[i] is None]
-    if any(
-        (t := registry.get(c.name)) is not None
-        and t.spec.execution == ExecMode.SEQUENTIAL
-        for c in calls
-    ):
-        for i, c in to_run:
-            results[i] = await _execute_one(registry, cancel, c)
-    else:
-        outs = await asyncio.gather(*(_execute_one(registry, cancel, c) for _, c in to_run))
-        for (i, _), out in zip(to_run, outs):
-            results[i] = out
-
-    # 3) finalize 串行：after 钩子可替换
-    finalized: list[ToolResult] = []
-    for r in results:
-        assert r is not None
-        for hook in after_hooks:
-            r = hook(r)
-        finalized.append(r)
-    return finalized
-
-
-async def _execute_one(registry: ToolRegistry, cancel: asyncio.Event, call: ToolCall) -> ToolResult:
-    tool = registry.get(call.name)
-    if tool is None:
-        return _error(f"工具不存在：{call.name}")
-    if cancel.is_set():
-        return _error("任务已取消，工具未执行")
-    start = time.monotonic()
-    try:
-        result = await tool.execute(call.call_id, call.params, cancel)
-    except Exception as exc:  # noqa: BLE001 —— 工具异常编码进结果，不向上抛
-        result = _error(f"工具执行异常：{exc}")
-    if result.details is None:
-        result.details = {}
-    result.details["duration"] = round(time.monotonic() - start, 4)
-    return result
 
 
 class ToolRejected(ValueError):

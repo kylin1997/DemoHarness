@@ -85,7 +85,7 @@ def test_only_a_typed_scope_change_authorizes_an_extra_path(tmp_path):
     asyncio.run(exercise())
 
 
-def test_legacy_direct_task_keeps_its_delivery_and_requires_new_write_authorization(tmp_path):
+def test_task_saved_before_write_scope_keeps_delivery_and_requires_new_authorization(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     responses = iter([
