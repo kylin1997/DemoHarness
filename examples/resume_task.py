@@ -56,7 +56,6 @@ async def run(root: Path) -> None:
         print(f"第一次 Run {first_run.id} 已主动停止，当时 draft.md 已写入一次。")
 
     async def resume_model(request: ModelRequest, _cancel: asyncio.Event) -> ModelResponse:
-        # 从重建的上下文取回第一次 Run 的工具结果，直接提交验收。
         (result,) = [message for message in request.messages if message["role"] == "tool"]
         assert result["tool_call_id"] == "write-draft" and result["content"] == written.result.content
         return ModelResponse(ModelStop.OK, "巡检记录已写入，可以验收。")

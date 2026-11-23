@@ -1,35 +1,25 @@
 # DemoHarness
 
-DemoHarness 是一个 Python 教学项目。你可以观察一个 Agent 怎样用工具完成工作，怎样检查自己的产物，以及怎样在中断后继续。每件事有自己的 Task、Session、Plan 和工作副本。
+DemoHarness 是一个 Python 教学项目，用来理解 Agent 调用模型和工具时，应用程序需要负责什么。你可以从一次消息开始，看到系统如何确定任务、保存上下文、限制工具权限、检查真实产物，以及在中断后继续。
 
-## 十分钟上手
+项目在本机的单进程里运行，使用 SQLite 保存状态。它演示的是基础机制。计划用于实际业务时，先看[生产化还要考虑什么](docs/architecture.md#生产化还要考虑什么)。
 
-准备 Python 3.11+、Git 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)。文件工具使用 POSIX 接口，建议在 Linux 或 macOS 上运行。
+## 开始运行
+
+准备 Python 3.11+、Git 和 uv。文件工具使用 POSIX 接口，建议在 Linux 或 macOS 上运行。 [安装 uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ```sh
-uv sync
+uv sync --locked
 uv run python examples/verified_task.py
 ```
 
-示例把「创建 `report.md` 并逐字核对内容」交给可控模型。你会看到正文、`passed` 检查结果、SHA-256 和 Git 差异。示例使用临时仓库，无需模型凭据。
+示例会在临时 Git 工作副本里写入 `report.md`。你会看到文件正文、`passed` 验收结果、SHA-256 和 Git 差异。Task 与 Session 的 ID 相同，源仓库保持原样。示例使用可控模型，无需 API 密钥。
 
-接下来按这个顺序读：
+## 接下来读什么
 
-1. 看[系统设计](docs/architecture.md)，理解 Task、Session 和 Run，跟着架构图追踪这次写入的执行循环和验收器。
-2. 想看多个 Task、临时子 Agent 和长期记忆怎样一起工作，运行综合示例：
+1. 先弄清 Agent、Task、Session、Plan 和 Run 各自负责什么，以及 CLI 和 Python API 怎样进入同一个运行时。 [架构总览](docs/architecture.md)
+2. 跟着 `report.md` 例子走一遍，从创建任务到模型提议写文件，再到宿主验收并记录交付。 [任务如何执行和交付](docs/task-execution.md)
+3. 看停止、重启和崩溃时，系统怎样从 Session 账本判断下一步。 [Session、上下文和恢复](docs/session-and-recovery.md)
+4. 看同一个 Agent 怎样处理多个请求、委派临时子 Agent，从历史提炼记忆，并从 Git 提交发现新工作。 [Super Agent 如何组织工作](docs/super-agent.md)
 
-   ```sh
-   uv run python examples/super_agent_demo.py
-   ```
-
-   你会看到 B 先交付，A 收到补充后修改 Plan，随后有新的 Git 提交触发工作。示例最后关闭再打开运行时，检查已保存的状态。想观察写入前后突然退出时怎样处理，跑[崩溃恢复测试](examples/README.md#观察崩溃恢复)。
-
-## 进阶用法
-
-设置 `OPENAI_API_KEY` 后，可以用真实模型聊天。使用 OpenAI 兼容服务时，可设置 `OPENAI_BASE_URL` 和 `MODEL`。
-
-```sh
-uv run demoharness chat local --project /path/to/a/git/repository
-```
-
-[指令、多 Agent 配置和验证命令](examples/README.md)
+[全部可运行示例和真实模型的 CLI 用法](examples/README.md)

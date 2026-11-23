@@ -15,7 +15,6 @@ async def scripted_model(request: ModelRequest, _cancel: asyncio.Event) -> Model
     if any(message["role"] == "tool" for message in request.messages):
         return ModelResponse(ModelStop.OK, "已写入报告，项目笔记保持原样。")
 
-    # 模拟模型请求写入两个文件，由宿主判定每个请求是否获准。
     return ModelResponse(ModelStop.OK, "", [
         {"call_id": "report", "name": "write_file", "params": {"path": "report.md", "content": REPORT}},
         {"call_id": "notes", "name": "write_file", "params": {"path": "NOTES.md", "content": "改写笔记\n"}},
@@ -39,7 +38,6 @@ async def run(root: Path) -> None:
         completed = await agent.wait(receipt.task_id)
         assert completed.state is TaskState.COMPLETED, completed.detail
 
-    # 从同一个状态目录重开，读取已持久化的动作结果和交付证据。
     async with AgentRuntime.open(state, [definition], observe=False) as runtime:
         agent = runtime.agent("demo")
         task = agent.task(receipt.task_id)
