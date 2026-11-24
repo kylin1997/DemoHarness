@@ -1,46 +1,47 @@
-# DemoHarness 使用示例（examples/）
+# 可运行的教学示例
 
-本目录存放**如何使用 DemoHarness SDK** 的最小可运行示例——面向刚上手的开发者，
-每个示例演示一个能力，真实模型驱动（证明「功能不减配」）。
+先在仓库根目录执行 `uv sync --locked`。下列命令使用可控模型和临时项目，无需模型凭据。
 
-## 准备
+| 想观察什么 | 运行命令 | 如何核对 |
+| --- | --- | --- |
+| 一个 Task 的完整交付 | `uv run python examples/verified_task.py` | `report.md` 内容逐字匹配，验收是 `passed`，交付包含 SHA-256 和 Git 差异。 |
+| 归属普通消息，同时推进多件事 | `uv run python examples/super_agent_demo.py` | 看协调器创建 A、把补充关联到同一个 Task 和 Session，以及 B 如何先交付。随后核对 Plan 版本变化、委派和记忆来源。 |
+| 用文件范围约束工具 | `uv run python examples/write_scope.py` | 在一个 Task 里核对获准写入、额外写入被拒、实际文件和交付证据。 |
+| 停止、重开与恢复 | `uv run python examples/resume_task.py` | 刚重开时仍是 `stopped`，只有一个 Run。显式恢复后出现第二个 Run，复用已记录的写入结果。 |
 
-先复制环境模板并填 API key：
+从运行结果追到执行模块，可以沿着文档里的源码入口阅读。 [架构总览](../docs/architecture.md)
+
+## 核对崩溃恢复
 
 ```sh
-cp examples/.env.example examples/.env   # 填 OPENAI_API_KEY
+uv run pytest -q tests/test_agent_runtime.py -k crash
 ```
 
-运行任意示例：
+测试在文件写入前后向子进程发送 `SIGKILL`，核对按指纹补记结果、安全重试、等待核对，以及撤销旧写入后的行为。运行全量测试用 `uv run pytest -q`。 [Session、上下文和恢复](../docs/session-and-recovery.md)
+
+## 使用真实模型聊天
+
+设置 `OPENAI_API_KEY` 后运行下方命令。OpenAI 兼容服务可用 `OPENAI_BASE_URL` 和 `MODEL` 指定地址与模型。这些命令会调用配置的服务并可能产生费用。
 
 ```sh
-uv run python examples/quickstart.py
+uv run demoharness chat local --project /path/to/a/git/repository
 ```
 
-## 与 scenarios/ 的区别
+可输入 `授权写入：notes.md | 创建 notes.md，内容为 hello，然后核对内容`。用 `/tasks` 查看 Task ID，`/show TASK` 查看 Plan、差异和验收证据，`/history TASK` 查记录，`/tell TASK MESSAGE` 补充要求。用 `/allow TASK PATH...` 授权已有 Task 写额外文件，其他命令见 `/help`。
 
-- `examples/`：**API 上手**。短、单个能力、真实模型单任务。
-- `scenarios/`（第 9 步）：**教学验证**。长、综合多特性、附四件套（输入/预期过程/完成证据/复现步骤）。
+默认状态目录是 `~/.demoharness`，可用 `--state-dir` 更改。单 Agent 启动时，从该目录的 `agents/<ID>/` 读取可选的 `SOUL.md` 和 `AGENTS.md`。Git 项目默认观察提交，各 Task 的产物留在独立的工作副本。
 
-两者互补：examples 教你「怎么调用」，scenarios 证明「综合起来为什么需要它」。
+也可以保存以下内容为 `agents.json`，运行 `uv run demoharness chat local --config agents.json`。配置中的 `project` 和 `root` 可相对于配置文件定位。可选 `model` 覆盖环境中的默认模型，用 `/agent review` 切换当前 Agent。
 
-## 示例清单
+```json
+{
+  "agents": [
+    {"id": "local", "project": "./repo", "root": "./profiles/local"},
+    {"id": "review", "project": "./repo"}
+  ]
+}
+```
 
-| 示例 | 演示的能力 |
-|---|---|
-| `quickstart.py` | 最小闭环：build → run → 读结果 → 会话树 |
-| `steering.py` | follow-up（同一会话再 run，上下文接续） |
-| `recovery.py` | 中断恢复（未终态 → 物化 interrupted → 发现 → 续跑） |
-| `session_tree.py` | fork / reset / delete 会话树动词 |
-| `tools_demo.py` | 工具三段式（read_file / write_file / run_command） |
-| `todo.py` | todo 工具（计划清单，状态落 details） |
-| `subagent.py` | delegate_subagent 多 Agent 分派 |
-| `plan_mode.py` | plan-mode 策略（计划提取 + 进度标记） |
-| `events.py` | task.events() 实时事件流 |
-| `status.py` | 状态查询（sessions / session_tasks / task / sessions_with） |
-| `bots.py` | 多 bot 隔离（各自世界 + bot_id 命名空间） |
+用 `uv run python examples/verified_task.py --live` 可以查看第一个示例的真实模型路径。
 
-## 运行时数据
-
-示例产生的 db 存在 `examples/_data/<示例名>.db`（`_data/` 目录 git 忽略）。
-真实模型配置经 `examples/.env`（不提交），模板见 `.env.example`。
+[返回入门](../README.md)

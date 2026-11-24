@@ -1,250 +1,64 @@
-# DemoHarness 架构
+# DemoHarness 架构总览
 
-本文描述 DemoHarness 的整体结构：模块划分、核心流程、数据形态与扩展方式。能力范围与阶段划分见 [agent-feature-scope.md](./specs/agent-feature-scope.md)；开发规约见 [AGENTS.md](../AGENTS.md)。
+DemoHarness 用一个 Python 进程托管多个 Agent。CLI 和 Python API 调用同一个运行时。SQLite 保存 Task、Session 记录和 Agent 记忆，工作副本保存实际产物。Agent 可以同时推进多件事，同一个 Task 同时最多由一个 Worker 推进。
 
-## 一句话架构
+在继续阅读前，可以先运行 `uv run python examples/verified_task.py`。这个例子创建 `report.md`，然后逐字核对文件内容。后面的流程都可以用它对照。 [文件示例](../examples/verified_task.py)
 
-DemoHarness 是一个**完整的、教学目的的 Agent harness**（上下文管理 + 工具接口 + 约束 + 验证 + 纠正；Agent = Model + Harness，定义自李博杰《深入理解 AI Agent》）。第一阶段以 SDK 形态交付这个 harness（类似 pi 的 `createAgentSession`）：通过 Python API 创建 bot、提交任务、获取结果，用完即走——不是常驻服务。微内核结构：**内核只做四件事——驱动任务循环、拥有会话存储、调用工具、提交状态**；其余一切（模型接入、工具实现、压缩策略、执行策略）都是挂在内核注入点上的扩展。
+## 先认清几个抽象
 
-```
-   调用方
-  ┌───────────────────────┐
-  │  SDK / 测试 / 示例     │
-  │  运行 / 观察 / 控制    │
-  └───────────┬───────────┘
-              │ 调用 SDK API（build / run / steering / cancel / 读状态）
-              ▼
-  ┌───────────────────────────────────────────┐
-  │  BotRuntime（runtime.py 组合根）           │
-  │  build(config) 装配并持有下面两框           │
-  │                                           │
-  │  ┌─────────────────┐  ┌────────────────┐  │
-  │  │ 内核 core/       │  │ 能力扩展        │  │
-  │  │                 │  │                │  │
-  │  │ 任务循环         │  │ tools/         │  │
-  │  │ 会话/存储拥有者   │◄─┤ compaction/    │  │
-  │  │ 工具调用协议     │  │ providers/     │  │
-  │  │ 提交协议         │  │                │  │
-  │  └────────┬────────┘  └────────────────┘  │
-  │           │          （注入点连接）        │
-  └───────────┼───────────────────────────────┘
-              ▼
-      SQLite（会话存储）
-```
+| 概念 | 职责和归属 |
+| --- | --- |
+| Agent 定义 | `AgentDefinition` 保存稳定 ID、所属项目、身份提示、模型入口和工具权限。CLI 可以读取 Agent 目录下的 `SOUL.md` 和 `AGENTS.md` 作为提示。 |
+| Agent 实例 | `runtime.agent(id)` 返回的操作入口，能接收消息、查 Task、停止和恢复工作。同一宿主内的 Task、工作目录、协调记录和长期记忆按 Agent ID 隔离。 |
+| Agent 运行时 | `AgentRuntime` 打开状态目录，管理 SQLite、协调器、观察器和 Worker 的生命周期。关闭后停止推进，重开时恢复可继续的工作。 |
+| Worker | 运行时为一个 Task 调度的进程内异步任务。它认领 Task、开启 Run，准备或复用工作副本，再推进执行循环。 |
+| Task | 一件可独立推进的工作，拥有目标、文件验收条件、写入范围、预算、工作副本及 Plan。 |
+| Session | 完成一件事留下的历史，包括用户输入、模型轮次、工具记录、Plan 修订和交付。每个 Task 对应一个 Session，共用 ID。 |
+| Plan | Task 当前准备做的有序步骤。每步有稳定 ID、状态和证据引用。模型可以修订计划，每次修订有版本和原因。 |
+| Run | Task 的一次执行尝试，记录起止时间、配置版本和结束原因。停止后继续同一个 Task 时会开始新的 Run。 |
+| Context | 一次模型请求的输入，来自当前目标、验收、Plan、Session 片段和相关记忆。每轮重新组装。 |
+| 子 Agent | 主 Task 临时委派的只读调查者。有独立上下文，按需读取父 Session，完成后交回结论与证据。 |
+| 长期记忆 | Agent 跨 Task 使用的偏好、项目事实、约束和经验，附带来源。项目知识可以按项目限定召回。 |
 
-依赖方向只有一个：**能力扩展 → core/（经注入点），core/ 不 import 任何扩展**。BotRuntime（`runtime.py`）是唯一知道全部部件的地方；外部（SDK 调用方、测试、教学示例）一律经 BotRuntime 的 API 使用 DemoHarness。
+## 一次工作怎样流动
 
-## 模块地图
-
-```text
-DemoHarness/
-├── src/demoharness/
-│   ├── runtime.py    # BotRuntime 组合根：build(config) 装配一切，暴露 SDK API
-│   ├── core/         # 内核（约 1200-1800 行，参照值非硬约束）
-│   │   ├── loop.py   # 任务循环骨架（ReAct 形态：思考→工具→观察→再判断）
-│   │   ├── session.py# 会话拥有者：每会话一个 FIFO，串行化一切写入
-│   │   ├── storage.py# Storage 协议 + SQLite 实现
-│   │   ├── task.py   # Task 状态机（run 级 checkpoint，见 Task 节）
-│   │   ├── tools.py  # 工具三段式协议 + 注册表
-│   │   └── events.py # 事件类型 + 注入点签名
-│   ├── bots/         # bot 定义（每 bot 一个 spec：SOUL、AGENTS.md、工具白名单）
-│   ├── tools/        # 具体工具实现（读写文件、执行命令等）
-│   ├── compaction/   # 上下文压缩（触发与切点算法）
-│   └── providers/    # 模型接入（stream_fn 的具体实现；OpenAI 兼容最小实现）
-├── scenarios/        # 教学场景（项目根）：真实模型驱动的复杂场景剧本，
-│                     #   综合运用各项特性，含输入/过程/证据/复现步骤
-├── tests/            # 测试（mock 模型，确定性）
-└── docs/             # 文档
+```mermaid
+flowchart TD
+    Direct["Python submit：已知目标与验收"] --> Queued["Task 入队，新 Task 建立同 ID 的 Session"]
+    Input["聊天消息或 Git 提交"] --> Router["协调器"]
+    Router -->|创建| Queued
+    Router -->|关联| Existing["补充写入已有 Session"]
+    Router -->|回复或澄清| Notice["通知"]
+    Existing -->|需要继续执行且满足条件| Queued
+    Existing -->|正在执行时在动作边界读取| Model
+    Queued --> Worker["Worker 认领，开启 Run"]
+    Worker --> Workspace["准备或复用工作副本"]
+    Workspace --> Model["从 Session 组装 Context，调用模型"]
+    Model -->|提出工具操作| Tool["宿主授权、记录并执行"]
+    Tool -->|结果写入 Session| Model
+    Model -->|提出完成| Verify["在实际文件上验收"]
+    Verify -->|可纠正且有预算| Model
+    Verify -->|通过| Delivery["保存验收证据和差异"]
 ```
 
-内核每部分对应一个必然问题（为什么存在它）：循环（Agent 必须行动）、存储（进程会中断）、工具协议（模型必须借助工具）、提交协议（状态必须先落盘再执行）。
+协调器决定消息归属，Worker 推进 Task，模型提出操作，宿主负责授权、执行和验收。这几段使用不同的输入和权限。子 Agent 与主 Worker 共用 `run_loop()`，由各自的角色配置决定可用上下文、工具和完成条件。协调、Worker 与临时委派的分工参考了 DeepSeek Super Agent 的领域模型。 [DeepSeek 领域模型](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/docs/001-domain.md)
 
-## 内核与扩展的边界
+## 从现象追到源码
 
-这张"内核不含 / 注入点 / 挂接扩展"表，即 harness 五要素到注入点的映射——上下文管理（会话树/压缩）、工具接口（工具协议）、约束（before/after 钩子 + 预算/工作区/取消，贯穿全流程）、验证（finish_turn 消费证据）、纠正（恢复物化/重试/steering）。
+| 想理解的问题 | 起点 | 接着读 |
+| --- | --- | --- |
+| 命令如何变成调用 | [CLI](../src/demoharness/cli.py) · [运行时和 Agent API](../src/demoharness/runtime.py) | [任务执行](task-execution.md) |
+| 模型、工具和验收怎样循环 | [执行循环](../src/demoharness/core/loop.py) · [文件工具](../src/demoharness/tools/files.py) | [任务执行](task-execution.md) |
+| 状态记在哪里，重启怎样继续 | [TaskStore](../src/demoharness/core/storage.py) · [Session 投影](../src/demoharness/core/session.py) | [Session 与恢复](session-and-recovery.md) |
+| 怎样处理多件事、委派并积累经验 | [消息路由](../src/demoharness/coordination.py) · [委派](../src/demoharness/tools/delegation.py) · [记忆](../src/demoharness/memory.py) · [Git 观察](../src/demoharness/discovery.py) | [Super Agent](super-agent.md) |
 
-内核刻意**不包含**以下概念，每个被排除的概念对应一个注入点（扩展从这里接入）。注入点是内核预留给扩展的调用位置——工具实现、模型接入、界面都以函数或回调的形式从这些位置进入内核流程：
+## 生产化还要考虑什么
 
-| 内核不含 | 注入点 | 挂接的扩展 |
-|---|---|---|
-| 模型接入 | `stream_fn`：调用模型的函数，每轮由循环调用一次。**契约：不得抛异常**，一切失败编码为返回结果中的 stop_reason | providers/ |
-| 持久化细节 | Storage 协议：`commit(writes) + 查询面`。SQLite 是唯一实现 | （协议留边界，不写第二实现） |
-| 权限与边界 | `before_tool_call` / `after_tool_call`：工具执行前后的钩子，前者可拦截调用 | 工具权限检查、审计 |
-| 上下文裁剪 | `transform_context`（组上下文前的裁剪）+ 每轮工具执行完的检查点 | compaction/ |
-| 新输入 | steering 与 follow-up 两类回调（见下）+ 会话 FIFO | SDK 调用方 |
-| 预算与终止 | `finish_turn`：每轮结束时的决策函数，返回 `{end, continue}`。**结果验证在这里消费证据**——验证是扩展，经此决定任务是否完成 | 各策略/验证器 |
-| 取消 | `cancel()` API：取消信号传播到 stream_fn 与工具执行 | 调用方 |
-| 工具实现 | 工具注册表：装配时显式注册，每工具声明 `name / schema / execute / 并发安全 / replay`（replay 声明中断后该工具是否可安全重放） | tools/ |
-| 会话树操作 | 会话树动词（见数据形态一节），守卫保护忙碌会话 | （经由会话 FIFO 或守卫调用） |
-| 活体观察 | 事件流：内核产出事件，SDK 调用方、测试与示例消费 | — |
+当前实现适用于单机教学。投入生产前，还需要根据数据敏感度、运行规模和工具风险完善这些方向。
 
-判断"新能力属于内核还是扩展"的标准：**循环跑不起来没有它吗**——是则内核，否则扩展。
-
-**steering 与 follow-up**：steering（转向）是任务运行中用户追加的指令，在当前任务的工具调用之间插入，不打断进行中的工作（例如"顺便也查一下 Y"）；follow-up 是任务结束后排队的新输入，开启下一次运行。两者都经会话 FIFO 进入，区别在插入时机。
-
-## 数据形态
-
-### bot：用户交互的个体
-
-bot 是用户与之交互的对象（架构师 bot、项目经理 bot……），多个 bot 并存且**互相隔离**：各有自己的会话、工作区、记忆、行动指南（AGENTS.md）、身份（SOUL）与工具集。用户与哪个 bot 对话，就工作在哪个 bot 的世界里。
-
-```text
-bots/               # 每个 bot 一个 spec（身份、行动指南、工具白名单、模型配置）
-workspace/<bot>/    # 每个 bot 独立工作区（文件、记忆）
-```
-
-- bot 的能力可持续优化：改它的 AGENTS.md / SOUL / 工具，下次任务即可验证改进。
-- 存储用 **bot_id 命名空间**隔离（sessions 表带 bot_id 列，会话与记忆按它过滤；工作区按目录隔离）。不做每 bot 独立数据库——那是产品级隔离，教学项目单库即可观察全部。
-- bot **不是内核概念**：内核只认会话与 Task；BotRuntime 依据 spec 装配出 bot 的一切。
-
-### 会话 = entry 树
-
-一切事实都是 entry（不可变的追加记录）。会话不是线性日志而是树：每条 entry 带 `parent_id`，当前活跃叶决定模型看到什么。
-
-```text
-entries 表：id, session_id, parent_id, kind, content
-sessions 表：id, bot_id, parent_session_id, fork_at_entry_id, ...
-```
-
-**重放算法**（模型上下文的唯一来源）：从活跃叶沿 parent 链**向老回溯**，遇到第一条边界 entry（compaction 或 reset 产生）即停。上下文按时间顺序 = **边界 entry 的摘要 + 边界 entry 之后（比它新）到活跃叶之间的全部 entry**。边界之前的更老 entry 不进入上下文，但永远保留在树里，可随时 fork。
-
-### 会话树动词（闭表，共六个）
-
-| 动词 | 语义 | 会话忙碌时（有任务在跑） |
-|---|---|---|
-| `new` | 新根会话 | 总是允许 |
-| `append` | 追加 entry | 只经会话 FIFO |
-| `reset` | 活跃叶移到历史节点，模型只见其后内容 | 拒绝（排队输入保留） |
-| `fork` | 新会话 + parent 边 + 分叉点，拷贝前缀 | 允许（快照语义：进行中任务属于原会话） |
-| `compact` | 写入压缩 entry（两段式，见压缩节） | 任务边界阻塞式执行 |
-| `delete` | 删除会话，级联删 fork 子树 | 仅全空闲时 |
-
-### Task：一次任务运行的状态机
-
-Task 是 **run 级**的（一次任务运行 = 一个 Task；单次工具调用不建 Task）。Task 用 phase 标记进度，每次 phase 推进都先写存储再继续（这就是 checkpoint）：
-
-```
-提交输入（input 已落盘）
-  → awaiting_tools（模型发了工具调用，已落盘）
-  → tools_completed（工具结果已落盘）
-  → final_response（最终回答已落盘，Task 终态）
-```
-
-**stop_reason 六态**（Task 终态的权威标记）：`completed / error / max_iterations / cancelled / empty_response / interrupted`。前五个是循环自身的终结（完成 / 出错 / 预算耗尽 / 用户取消 / 模型空响应）；`interrupted` 只由恢复流程设置（见恢复节）。完成、失败、取消、预算耗尽必须可区分，不凭模型自称完成。
-
-## 核心流程
-
-### 一次任务运行（ReAct 循环）
-
-1. 输入（SDK 调用提交）进入**会话 FIFO**；
-2. 会话 worker 从 FIFO 取输入 → 创建 Task → 用户输入先落盘（早持久化）；
-3. 循环：按重放算法组装上下文 → 注入的 `stream_fn` 调用模型 → 事件流推送（观察方）；
-4. 模型返回工具调用 → 落盘后执行工具（三段式：prepare 校验/钩子 → execute → finalize 钩子）→ 结果落盘为 entry → 回到 3；
-5. 模型返回最终回答（无工具调用）→ `finish_turn` 决策（预算/验证在此）→ 落盘回答 → Task 终态（stop_reason）；
-6. 回答进入会话历史，调用方取回结果。
-
-### 恢复（任务停止后）
-
-停止有两种原因、两条恢复路径，二者都依赖同一个事实——进度早已落盘为 entry：
-
-- **进程死**（外部杀死/崩溃）：BotRuntime 打开存储时扫描未终态 Task，把中断事实物化并置 `interrupted`，续跑由调用方显式重新提交（恢复节下文的扫描流程）。
-- **用户主动取消**（`cancelled`，干净终态）：会话停在当前活跃叶，此前落盘的内容全在。用户补充的信息作为**下一次 run** 从活跃叶重放，天然接续——这靠 run 重放，不是恢复扫描。
-
-前者是"进程没了之后"的恢复，后者是"停下来继续聊"的常态，机制不同；真正需要扫描 + 物化的只有前者。
-
-### 恢复扫描（进程中断后）
-
-BotRuntime 打开存储时扫描未终态 Task，对每个：
-
-1. 若有已落盘但未完成的工具调用，**在其所在分支物化一条"已中断"结果 entry**——把中断事实写进转录，工具绝不重新执行（工具可能有副作用）；
-2. Task 置为 `interrupted` 终态（第 1、2 步在同一个写事务里完成，物化恰好一次）；
-3. 续跑由调用方显式重新提交（副作用不可知时宁可不自动续跑）。
-
-### 压缩（两段式）
-
-触发（上下文接近窗口上限的阈值估算）与切点选择（边界必须落在完整的一轮对话上，不在工具结果中间切）都是 compaction/ 扩展的职责。压缩本身分两步：**事务外**调用模型生成摘要（慢、可能失败，不占存储锁）→ **事务内**把摘要写为 compaction entry（此时校验活跃叶未变，变了则放弃本轮、下次再压）。压缩后，重放算法自动取"摘要 + 保留段"，原始 entry 留在树里。
-
-## 不变量清单
-
-1. 同会话一切写入经会话 FIFO 串行（steering、压缩提交都走它）；
-2. entry 创建后不可变，树只增不改；
-3. 每次 commit 原子（SQLite `BEGIN IMMEDIATE`）；
-4. 全局 entry id 单调递增（跨重启）；
-5. 恢复时已落盘但未完成的工具调用绝不重新执行，中断事实物化为 entry；
-6. 历史事实只来自 entry 流水；事件流只做活体推送，消费方刷新/重连从存储重建；
-7. stop_reason 六态是任务终态的唯一权威，不信模型自称。
-
-## 模型配置（三层）
-
-解析顺序：**任务覆盖 > 会话覆盖 > 全局默认**。全局在 config 文件，会话层供交互面切换模型，任务层供程序化调用指定不同模型。
-
-“模型配置”不止“选哪个模型”——推理强度/thinking 开关等 provider 生成参数属于同一解析链的扩展位（字段由 spec 的 config 能力域界定，属纯增量，待接入真正支持它的模型时补）。
-
-## 执行策略（全部是扩展）
-
-运行前选择执行策略：ReAct（走一步判断，内核循环即此形态）、Plan-and-Execute、Reflection、Multi-Agent（动态工作流）。**第一阶段只实现 ReAct**；其余三种是驱动同一循环的编排扩展，内核的 Task 与注入点已为其留位。
-
-策略选择是**进入时的一次性决策**，写进 Task 状态、恢复不丢；执行中途只由规则（预算/取消/重试上限）转移，不由模型临场改——长程任务中模型中途忘记原计划是常见出错点。
-
-## 任务分派与 subagent（策略扩展的一部分）
-
-bot 接到一个任务并决定拆分后，每个子任务有三种执行去向：
-
-| 去向 | 机制 | 生命周期 |
-|---|---|---|
-| 自己执行 | 当前 bot 的循环继续 | — |
-| 派给另一个 bot | 用**对方 bot 的 spec** 开新会话执行，结果回传 | 持久（对方的会话与记忆沉淀在对方世界里） |
-| 启动 subagent | 用**内联参数**（聚焦 prompt + 受限工具集 + 预算切片）开新会话执行，`final_response` 作为工具结果返回 | 临时（身份即弃，干完销毁；执行记录照常入库，可重放观察） |
-
-三者共用同一机制（新会话 + Task），只是会话身份来源不同（具名 bot spec vs 工具参数内联）——一机制两来源，不新增运行时概念。子会话与父会话有溯源链接，但**不进父会话的上下文**。
-
-分派（怎么拆、派给谁）由策略扩展提供工具（delegate_subagent / assign_bot / plan 等）供模型决策；默认 ReAct 策略不含分派。
-
-**后台模式与 Agent View**（第一阶段，第 8 步落地）：subagent 可后台执行——发起后不等待，父会话继续工作；完成后结果作为 follow-up 输入回投父会话（经会话 FIFO 送达，不打断进行中的 turn）。后台任务在进程重启后存活：恢复扫描发现后台 Task 未终态时**自动重新排队**（区别于前台任务的"物化中断+显式续跑"——后台任务的意义就是无人值守），仅 phase 在 awaiting_tools 之前且工具声明 replay=safe 的调用可重放，副作用工具一律物化中断；同一任务链 interrupted 计数即重启计数，超 3 停车待人工。观察侧为 Agent View：后台任务列表（Task 状态 + 子会话入口），每个后台任务是一个可观察的 background session。
-
-## 场景模拟（scenarios/，项目根）
-
-教学场景库：每个场景是一个模拟现实任务的复杂剧本（真实模型驱动，不做模拟数据的玩具示例），完成过程综合运用多项特性。每个场景提供：场景描述、输入、预期过程、完成证据、复现步骤——这是「功能不减配」准则的落地：每个特性的价值必须有一个可复现的场景作证据。场景随特性逐步建成，每个场景力求覆盖多个特性（如：长程任务 + 工具失败重试 + 中断恢复 + 压缩触发）。常规测试（tests/，mock 模型保证确定性）与场景（真实模型演示）是互补的两层：测试验证代码正确，场景演示能力价值。
-
-## 附录：实现期约束
-
-### 模块预算表（core/，参照值非硬约束）
-
-| 模块 | 预算（行） |
-|---|---|
-| loop.py 循环骨架 | 400-600 |
-| session.py 会话拥有者 | 200-300 |
-| storage.py Storage 协议+SQLite | 100-150 |
-| task.py Task 状态机 | 200-300 |
-| tools.py 工具协议+注册表 | 150-200 |
-| events.py 事件+注入点签名 | 150-250 |
-| **合计** | **1200-1800** |
-
-突破 1800 时由开发者决策——预算表的作用是逼人先做减法，不是为凑数字牺牲质量。
-
-### 技术立场（已定，不再开放）
-
-- **单进程 asyncio**；sqlite3 直接在事件循环线程执行（短事务可接受，恢复重放是同步 O(n)，教学规模接受）
-- **SQLite**（WAL + synchronous=NORMAL，本地盘）为唯一持久化实现；测试用临时文件 SQLite
-- **会话 FIFO 为内存态**，用户输入在任务开始前早落盘；重启丢排队中的 steering，下次提交即恢复
-- 排除（第一阶段不做）：gateway 常驻、cron 定时调度、外部 channel、交互式 CLI、Web 界面、跨进程扩展点（epoch/lease/OFD 锁/worker 词汇表）、插件加载发现机制、PRAGMA 防御全家桶
-
-## 阅读顺序（新人动线）
-
-1. [README.md](../README.md)（项目是什么）→ 2. [agent-feature-scope.md](./specs/agent-feature-scope.md)（做什么）→ 3. 本文（怎么搭的）→ 4. `core/loop.py`（循环）→ 5. `core/session.py` + `storage.py`（数据）→ 6. 任一扩展目录（如 `compaction/`，看注入点怎么被使用）→ 7. `scenarios/`（能力如何被验证）。
-
-## 待决策项（设计稿分歧点汇总）
-
-各模块设计稿中留待用户决策的分歧点，集中于此便于一次性评审。编号按模块顺序排，非按重要程度：
-
-| # | 议题 | 分歧 | 我的默认 | 出处 |
-|---|---|---|---|---|
-| 1 | 工具结果是否保留 `terminate` 字段 | 评审认为三工具无一用它（为未来预留=过度设计） vs 留协议位 | 砍，未来纯增量加回 | tools.md 分歧 1 |
-| 2 | 取消时是否杀正在跑的子进程 | timeout 兜底（不 kill） vs 真中断（+30 行进程组管理） | 不 kill | tools.md 分歧 2 |
-| 3 | LENGTH（上下文超限）过渡期处理 | error + reset 兜底 vs 临时手动压缩 | error + reset | loop-providers.md 分歧 3 |
-| 4 | finish_turn 是否配教学示例验证器 | 只留签名 vs 给示例验证器 | 只留签名 | loop-providers.md 分歧 4 |
-| 5 | 会话层模型存储 | sessions 表补 model 列 vs sidecar | 补列（已完成） | events-bots.md 分歧 5 |
-| 6 | 压缩摘要用哪个模型 | 当前模型 vs spec 加 compaction_model 字段 | 当前模型 | compaction.md 分歧 6 |
-| 7 | 场景数量 | 三场景 vs 加多 bot 协作 | 四场景（多 bot 协作场景随多 Agent 进第一阶段而纳入） | scenarios.md 分歧 7 |
-
-任何一项“按默认执行”即可放行；逐项异议在对应设计稿的「留用户决策」节展开。
+1. **权限与隔离**。明确用户和服务身份。为高风险工具设置审批、执行沙箱和网络访问策略。
+2. **可靠执行**。定义重试与幂等边界，验证数据库备份、迁移和故障恢复。
+3. **并发与容量**。按用户或租户隔离任务，设计队列调度、限流及资源配额。
+4. **数据与隐私**。集中管理凭据，规定 Session 和记忆的访问、保留与删除策略。
+5. **可观测性与运营**。关联 Task、Run 和工具日志，建立指标、追踪、告警和审计。
+6. **模型质量与成本**。用实际任务持续评测，设置调用预算、超时和降级策略。
