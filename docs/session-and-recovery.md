@@ -1,6 +1,6 @@
 # Session、上下文和恢复
 
-以一个写入任务为例。第一次 Run 写出文件，随后宿主停止或崩溃。重开后，Task ID 和 Session ID 仍是原来的，Worker 从已保存的动作和文件状态判断下一步。恢复执行会使用新的 Run ID。 [恢复示例](../examples/resume_task.py)
+以一个写入任务为例。第一次 Run 写出文件，随后你主动停止 Task，或运行时退出。Task ID 和 Session ID 保存在状态目录中。继续执行时会开启新的 Run，并从已保存的动作和文件状态判断下一步。 [恢复示例](../examples/resume_task.py)
 
 ## 什么会留下
 
@@ -20,15 +20,25 @@
 
 当消息超过配置的窗口，或者模型报告长度限制时，循环可以把较早的完整组压成短摘要，并保留最近的组。原始记录仍可查。模型每轮同时收到当前目标、Plan、验收、写入范围和少量相关记忆，因而不会只依赖旧摘要来理解最新要求。 [上下文组装](../src/demoharness/core/loop.py)
 
-## 两种恢复场景
+## 三种恢复场景
 
-主动停止会把 Task 保留为 `stopped`，重开宿主后仍需明确调用 `resume()`。正常关闭宿主会暂停忙碌的 Worker，正在执行的阻塞 I/O 退出后才释放宿主锁。进程意外退出时，下次打开把未结束的 Run 标记为中断，再使 Task 回到队列。 [停止与恢复入口](../src/demoharness/runtime.py) · [中断记录](../src/demoharness/core/storage.py)
+| 发生了什么 | 持久化的状态 | 重开后怎样继续 |
+| --- | --- | --- |
+| 主动停止 Task | Task 为 `stopped`，Run 以 `stopped` 结束。 | 保持停止，明确调用 `resume()` 后才重新入队。 |
+| 正常关闭宿主 | 执行中的 Task 回到队列，Run 以 `paused` 结束。已开始的阻塞 I/O 退出后，宿主才释放锁。 | 打开同一个状态目录，运行时自动调度已入队的 Task。 |
+| 进程崩溃 | 退出时可能还有未结束的 Run。 | 下次打开时将这些 Run 标记为 `interrupted`，自动将 Task 重新入队。执行循环先核对已有动作。 |
+
+[运行时的停止、关闭与恢复](../src/demoharness/runtime.py) · [崩溃恢复记录](../src/demoharness/core/storage.py)
+
+### 观察主动停止与继续
 
 ```sh
 uv run python examples/resume_task.py
 ```
 
-从输出中核对主动停止、重开和恢复三个阶段。结束后应看到两次 Run、同一个 Task 和 Session，以及之前写入的记录和通过的验收。
+从输出中核对主动停止、重开和恢复三个阶段。调用 `resume()` 前应看到 `stopped`、Run 数量为 1。继续后出现第二次 Run，Task 和 Session ID 沿用原值，文件验收通过，之前的写入结果被复用。
+
+### 观察崩溃后的文件核对
 
 进程突然退出时，写入可能已经落盘，结果还没来得及写进 SQLite。宿主先持久记录 `pending`、`started`，再执行文件写入。写入意图包含原始和目标内容的指纹，用来补足这段时间的不确定性。 [动作推进](../src/demoharness/core/loop.py) · [文件指纹](../src/demoharness/tools/files.py)
 

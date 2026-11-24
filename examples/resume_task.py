@@ -64,8 +64,10 @@ async def run(root: Path) -> None:
     async with AgentRuntime.open(state, [definition], observe=False) as runtime:
         agent = runtime.agent("demo")
         reopened = agent.task(stopped.id)
+        runs_before_resume = agent.runs(reopened.id)
         assert reopened.state is TaskState.STOPPED and reopened.session_id == stopped.session_id
-        assert agent.runs(reopened.id) == [first_run] and agent.actions(reopened.id) == [written]
+        assert runs_before_resume == [first_run] and agent.actions(reopened.id) == [written]
+        print(f"重开后尚未调用 resume() · Task 状态 {reopened.state} · Run 数量 {len(runs_before_resume)}")
         await agent.resume(reopened.id)
         completed = await agent.wait(reopened.id)
 

@@ -5,9 +5,9 @@
 | 想观察什么 | 运行命令 | 如何核对 |
 | --- | --- | --- |
 | 一个 Task 的完整交付 | `uv run python examples/verified_task.py` | `report.md` 内容逐字匹配，验收是 `passed`，交付包含 SHA-256 和 Git 差异。 |
-| 一个 Agent 同时推进多件事 | `uv run python examples/super_agent_demo.py` | B 先交付，A 收到补充后修订 Plan 并委派子 Agent。之后能看到记忆召回、Git 主动发现和重启后的状态。 |
+| 归属普通消息，同时推进多件事 | `uv run python examples/super_agent_demo.py` | 看协调器创建 A、把补充关联到同一个 Task 和 Session，以及 B 如何先交付。随后核对 Plan 版本变化、委派和记忆来源。 |
 | 用文件范围约束工具 | `uv run python examples/write_scope.py` | 在一个 Task 里核对获准写入、额外写入被拒、实际文件和交付证据。 |
-| 停止、重开与恢复 | `uv run python examples/resume_task.py` | 主动停止后重开运行时，仍能查询同一个 Task 和 Session。明确恢复后出现新的 Run，已记录的动作可复用。 |
+| 停止、重开与恢复 | `uv run python examples/resume_task.py` | 刚重开时仍是 `stopped`，只有一个 Run。显式恢复后出现第二个 Run，复用已记录的写入结果。 |
 
 从运行结果追到执行模块，可以沿着文档里的源码入口阅读。 [架构总览](../docs/architecture.md)
 

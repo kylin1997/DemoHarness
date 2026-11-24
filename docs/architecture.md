@@ -11,6 +11,7 @@ DemoHarness 用一个 Python 进程托管多个 Agent。CLI 和 Python API 调�
 | Agent 定义 | `AgentDefinition` 保存稳定 ID、所属项目、身份提示、模型入口和工具权限。CLI 可以读取 Agent 目录下的 `SOUL.md` 和 `AGENTS.md` 作为提示。 |
 | Agent 实例 | `runtime.agent(id)` 返回的操作入口，能接收消息、查 Task、停止和恢复工作。同一宿主内的 Task、工作目录、协调记录和长期记忆按 Agent ID 隔离。 |
 | Agent 运行时 | `AgentRuntime` 打开状态目录，管理 SQLite、协调器、观察器和 Worker 的生命周期。关闭后停止推进，重开时恢复可继续的工作。 |
+| Worker | 运行时为一个 Task 调度的进程内异步任务。它认领 Task、开启 Run，准备或复用工作副本，再推进执行循环。 |
 | Task | 一件可独立推进的工作，拥有目标、文件验收条件、写入范围、预算、工作副本及 Plan。 |
 | Session | 完成一件事留下的历史，包括用户输入、模型轮次、工具记录、Plan 修订和交付。每个 Task 对应一个 Session，共用 ID。 |
 | Plan | Task 当前准备做的有序步骤。每步有稳定 ID、状态和证据引用。模型可以修订计划，每次修订有版本和原因。 |
@@ -23,12 +24,16 @@ DemoHarness 用一个 Python 进程托管多个 Agent。CLI 和 Python API 调�
 
 ```mermaid
 flowchart TD
-    Direct["Python submit：已知目标与验收"] --> Task["Task 与工作副本"]
+    Direct["Python submit：已知目标与验收"] --> Queued["Task 入队，新 Task 建立同 ID 的 Session"]
     Input["聊天消息或 Git 提交"] --> Router["协调器"]
-    Router -->|创建或关联| Task
+    Router -->|创建| Queued
+    Router -->|关联| Existing["补充写入已有 Session"]
     Router -->|回复或澄清| Notice["通知"]
-    Task --> Worker["Worker 认领，开启 Run"]
-    Worker --> Model["从 Session 组装 Context，调用模型"]
+    Existing -->|需要继续执行且满足条件| Queued
+    Existing -->|正在执行时在动作边界读取| Model
+    Queued --> Worker["Worker 认领，开启 Run"]
+    Worker --> Workspace["准备或复用工作副本"]
+    Workspace --> Model["从 Session 组装 Context，调用模型"]
     Model -->|提出工具操作| Tool["宿主授权、记录并执行"]
     Tool -->|结果写入 Session| Model
     Model -->|提出完成| Verify["在实际文件上验收"]
