@@ -25,8 +25,9 @@ from ..core.git import (
     change_fingerprint,
     raw_changes,
 )
-from ..core.task import Action, CheckEvidence, FileCheck, Task, Verdict, task_path
+from ..core.task import Action, Check, CheckEvidence, FileCheck, Task, Verdict, Verifier, task_path
 from ..core.tools import (
+    RegisteredTool,
     ReplayPolicy,
     ToolRejected,
     ToolResult,
@@ -464,34 +465,45 @@ class FileTools:
         self,
         workspace: Workspace,
         capabilities: frozenset[str],
-        acceptance: tuple[FileCheck, ...],
+        acceptance: tuple[FileCheck | Check, ...],
+        tools: tuple[RegisteredTool, ...] = (),
+        verifiers: tuple[Verifier, ...] = (),
     ):
+        self.registered = {tool.spec.name: tool for tool in tools if tool.spec.name in capabilities}
+        self.verifiers = {verifier.name: verifier for verifier in verifiers}
+        self.specs = {**_SPECS, **{name: tool.spec for name, tool in self.registered.items()}}
         self.workspace = workspace
         self.capabilities = capabilities
         self.checks = {check.id: check for check in acceptance}
 
     def definitions(self) -> list[ToolSpec]:
-        return [spec for name, spec in _SPECS.items() if name in self.capabilities]
+        return [spec for name, spec in self.specs.items() if name in self.capabilities]
 
     def allowed_write_paths(self) -> frozenset[str]:
         return self.workspace.task.allowed_write_paths
 
     def authorize(self, action: Action) -> None:
         call = action.call
-        if call.name not in self.capabilities or call.name not in _SPECS:
+        if call.name not in self.capabilities or call.name not in self.specs:
             raise ToolRejected(f"Tool is not authorized: {call.name}")
-        valid, detail = validate_params(_SPECS[call.name], call.params)
+        valid, detail = validate_params(self.specs[call.name], call.params)
         if not valid:
             raise ToolRejected(detail)
         if call.name == "write_file" and "/".join(_relative(call.params["path"])) not in self.allowed_write_paths():
             raise ToolRejected(f"Path outside the Task write scope: {call.params['path']!r}")
-        if call.name == "run_check" and call.params["recipe_id"] not in self.checks:
-            raise ToolRejected(f"Unknown check recipe: {call.params['recipe_id']}")
+        if call.name == "run_check":
+            recipe = call.params["recipe_id"]
+            if recipe not in self.checks:
+                raise ToolRejected(f"Unknown check recipe: {recipe}")
+            if isinstance(self.checks[recipe], Check):
+                raise ToolRejected("The host runs this verifier on the final delivery text")
 
     async def prepare(self, action: Action) -> dict | None:
         self.authorize(action)
         if action.call.name == "write_file":
             return await run_io(self._write_intent, action.call.params)
+        if action.call.name in self.registered:
+            return {"replay": self.registered[action.call.name].spec.replay.value}
         return None
 
     def _write_intent(self, params: dict) -> dict:
@@ -504,7 +516,9 @@ class FileTools:
         }
 
     async def reconcile(self, action: Action) -> ToolResult | None:
-        spec = _SPECS.get(action.call.name)
+        spec = self.specs.get(action.call.name)
+        if action.call.name in self.registered and (action.intent or {}).get("replay") != ReplayPolicy.SAFE.value:
+            raise UnknownEffect(f"Cannot reconcile {action.call.name} ({action.id})")
         if spec and spec.replay is ReplayPolicy.SAFE:
             return None
         if action.call.name != "write_file" or action.intent is None:
@@ -529,6 +543,19 @@ class FileTools:
 
     def _execute_file(self, action: Action, intent: dict | None) -> ToolResult:
         name, params = action.call.name, action.call.params
+        if name in self.registered:
+            try:
+                result = self.registered[name].execute(params)
+                if not isinstance(result, ToolResult) or not isinstance(result.content, str):
+                    raise TypeError("Expected ToolResult with text content")
+                json.dumps(result.details, allow_nan=False)
+                return result
+            except (ToolRejected, UnknownEffect):
+                raise
+            except Exception as error:
+                if self.registered[name].spec.replay is ReplayPolicy.NEVER:
+                    raise UnknownEffect(f"Unknown effect of {name}: {error}") from error
+                raise ToolRejected(f"{name}: {error}") from error
         if name == "read_file":
             data = self.workspace.read(params["path"])
             return ToolResult(data.decode("utf-8"), {"sha256": _sha(data)})
@@ -544,7 +571,18 @@ class FileTools:
             evidence.verdict is not Verdict.PASSED,
         )
 
-    def check(self, check: FileCheck) -> CheckEvidence:
+    def check(self, check: FileCheck | Check, task: Task | None = None, text: str = "") -> CheckEvidence:
+        if isinstance(check, Check):
+            verifier = self.verifiers.get(check.verifier)
+            if verifier is None:
+                return CheckEvidence(check.id, None, Verdict.UNVERIFIABLE, f"Missing verifier: {check.verifier}")
+            try:
+                verdict, detail = verifier.verify(task or self.workspace.task, check, text)
+                if not isinstance(verdict, Verdict) or not isinstance(detail, str):
+                    raise ValueError("Expected (Verdict, detail)")
+            except Exception as error:
+                return CheckEvidence(check.id, None, Verdict.UNVERIFIABLE, f"{check.verifier}: {error}")
+            return CheckEvidence(check.id, None, verdict, detail)
         if "run_check" not in self.capabilities:
             return CheckEvidence(
                 check.id,

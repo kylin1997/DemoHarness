@@ -5,7 +5,8 @@ Task 代表持续推进的一件事，Run 记录一次执行尝试。TaskStore �
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -35,6 +36,7 @@ class RunReason(StrEnum):
     EMPTY_RESPONSE = "empty_response"
     VERIFICATION_FAILED = "verification_failed"
     UNVERIFIABLE = "unverifiable"
+    REVIEW_REQUIRED = "review_required"
     UNKNOWN_EFFECT = "unknown_effect"
     WORKSPACE_ERROR = "workspace_error"
     RUNTIME_ERROR = "runtime_error"
@@ -68,10 +70,37 @@ class FileCheck:
     id: str = ""
 
     def __post_init__(self) -> None:
-        if not self.path:
-            raise ValueError("A file check needs a path")
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError("A file check needs a text path")
+        if any(value is not None and not isinstance(value, str) for value in (self.equals, self.contains)):
+            raise ValueError("File check content must be text")
+        if not isinstance(self.id, str) or type(self.python_syntax) is not bool:
+            raise ValueError("A file check needs a text id and a boolean python_syntax")
         if not self.id:
             object.__setattr__(self, "id", self.path)
+
+
+@dataclass(frozen=True)
+class Check:
+    id: str
+    verifier: str
+    params: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.id, str) or not self.id.strip() or not isinstance(self.verifier, str)
+                or not self.verifier.strip() or not isinstance(self.params, dict)):
+            raise ValueError("A Check needs an id, verifier name, and JSON parameters")
+        object.__setattr__(self, "params", json.loads(json.dumps(self.params, allow_nan=False)))
+
+
+@dataclass(frozen=True)
+class Verifier:
+    name: str
+    verify: Callable[[Task, Check, str], tuple[Verdict, str]]
+
+
+def parse_check(data: dict) -> FileCheck | Check:
+    return Check(**data) if "verifier" in data else FileCheck(**data)
 
 
 def task_path(path: str) -> str:
@@ -89,9 +118,11 @@ def write_paths(paths: Iterable[str]) -> frozenset[str]:
     return frozenset(task_path(path) for path in paths)
 
 
-def check_write_paths(checks: Iterable[FileCheck]) -> frozenset[str]:
+def check_write_paths(checks: Iterable[FileCheck | Check]) -> frozenset[str]:
     paths = set()
     for check in checks:
+        if not isinstance(check, FileCheck):
+            continue
         try:
             paths.add(task_path(check.path))
         except (TypeError, ValueError):
@@ -102,7 +133,7 @@ def check_write_paths(checks: Iterable[FileCheck]) -> frozenset[str]:
 @dataclass(frozen=True)
 class CheckEvidence:
     id: str
-    path: str
+    path: str | None
     verdict: Verdict
     detail: str
     sha256: str | None = None
@@ -122,7 +153,7 @@ class Task:
     agent_id: str
     project: Path
     goal: str
-    acceptance: tuple[FileCheck, ...]
+    acceptance: tuple[FileCheck | Check, ...]
     workspace: Path
     state: TaskState
     budget: Budget

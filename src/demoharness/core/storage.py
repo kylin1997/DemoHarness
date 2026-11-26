@@ -23,7 +23,9 @@ from .task import (
     Budget,
     CheckEvidence,
     Delivery,
+    Check,
     FileCheck,
+    parse_check,
     Input,
     InputReceipt,
     Run,
@@ -197,9 +199,9 @@ class TaskStore:
         ).lastrowid
 
     def submit(
-        self, agent_id: str, project: Path, goal: str, acceptance: tuple[FileCheck, ...],
+        self, agent_id: str, project: Path, goal: str, acceptance: tuple[FileCheck | Check, ...],
         budget: Budget, capabilities: frozenset[str], input_id: str, input_text: str | None = None,
-        *, base_commit: str | None = None, allowed_write_paths: frozenset[str] = frozenset(),
+        *, event_source: str | None = None, base_commit: str | None = None, allowed_write_paths: frozenset[str] = frozenset(),
     ) -> InputReceipt:
         previous = self.input(agent_id, input_id)
         if previous:
@@ -218,7 +220,8 @@ class TaskStore:
             )
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)",
                             (input_id, agent_id, task_id, goal if input_text is None else input_text))
-            self._entry(task_id, None, "input", input_id=input_id, source="observation" if base_commit else "user",
+            self._entry(task_id, None, "input", input_id=input_id, source="event" if event_source else "observation" if base_commit else "user",
+                        event_source=event_source,
                         allowed_write_paths=sorted(allowed_write_paths))
             self.db.execute("INSERT INTO task_plans VALUES (?, ?)",
                 (task_id, json.dumps(asdict(Plan().revise([goal.strip()[:500]])), ensure_ascii=False)))
@@ -227,8 +230,8 @@ class TaskStore:
                                 (base_commit, task_id))
         return InputReceipt(input_id, task_id)
 
-    def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False,
-                  acceptance: tuple[FileCheck, ...] | None = None, goal: str | None = None,
+    def follow_up(self, task: Task, input_id: str, text: str, *, observed: bool = False, event_source: str | None = None,
+                  acceptance: tuple[FileCheck | Check, ...] | None = None, goal: str | None = None,
                   allowed_write_paths: frozenset[str] | None = None) -> InputReceipt:
         previous = self.input(task.agent_id, input_id)
         if previous:
@@ -237,7 +240,8 @@ class TaskStore:
             return InputReceipt(input_id, task.id)
         with self.transaction():
             self.db.execute("INSERT INTO inputs VALUES (?, ?, ?, ?)", (input_id, task.agent_id, task.id, text))
-            self._entry(task.id, None, "input", input_id=input_id, source="observation" if observed else "user")
+            self._entry(task.id, None, "input", input_id=input_id, source="event" if event_source else "observation" if observed else "user",
+                        event_source=event_source)
             if not observed and allowed_write_paths is not None and allowed_write_paths != task.allowed_write_paths:
                 paths = sorted(allowed_write_paths)
                 self.db.execute("UPDATE tasks SET allowed_write_paths = ? WHERE id = ?",
@@ -251,7 +255,7 @@ class TaskStore:
                 checks = [asdict(check) for check in acceptance]
                 self.db.execute("UPDATE tasks SET acceptance = ? WHERE id = ?", (json.dumps(checks), task.id))
                 self._entry(task.id, None, "acceptance_revised", input_id=input_id, checks=checks)
-            if task.state is TaskState.COMPLETED and not observed:
+            if task.state is TaskState.COMPLETED and not observed and not event_source:
                 budget = Budget()
                 self.db.execute("""UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL, delivery = NULL,
                     model_calls = ?, tool_calls = ?, verifications = ?, compactions = ? WHERE id = ?""",
@@ -259,7 +263,7 @@ class TaskStore:
                 self._entry(task.id, None, "reopened", input_id=input_id)
             elif (task.state is TaskState.WAITING and not observed
                   and task.reason not in {RunReason.BUDGET_EXHAUSTED, RunReason.UNKNOWN_EFFECT}):
-                self.db.execute("UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL WHERE id = ?",
+                self.db.execute("UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL, delivery = NULL WHERE id = ?",
                                 (task.id,))
                 self._entry(task.id, None, "unblocked", input_id=input_id)
         return InputReceipt(input_id, task.id)
@@ -323,7 +327,7 @@ class TaskStore:
             delivery = Delivery(delivery["text"], checks, delivery["diff"], delivery.get("change_fingerprint"))
         return Task(
             id=row["id"], agent_id=row["agent_id"], project=Path(row["project"]), goal=row["goal"],
-            acceptance=tuple(FileCheck(**check) for check in json.loads(row["acceptance"])),
+            acceptance=tuple(parse_check(check) for check in json.loads(row["acceptance"])),
             workspace=Path(row["workspace"]), state=TaskState(row["state"]),
             budget=Budget(**{name: row[name] for name in Budget.__dataclass_fields__}),
             capabilities=frozenset(json.loads(row["capabilities"])), session_id=task_id,
@@ -365,7 +369,7 @@ class TaskStore:
         run = Run(uuid4().hex, task_id, config_version, time.time())
         with self.db:
             claimed = self.db.execute(
-                "UPDATE tasks SET state = 'running', reason = NULL, detail = NULL WHERE id = ? AND state = 'queued'",
+                "UPDATE tasks SET state = 'running', reason = NULL, detail = NULL, delivery = NULL WHERE id = ? AND state = 'queued'",
                 (task_id,),
             ).rowcount
             if not claimed:
@@ -449,6 +453,8 @@ class TaskStore:
                     delivery=asdict(delivery) if delivery else None)
         if state in {TaskState.COMPLETED, TaskState.WAITING, TaskState.FAILED, TaskState.STOPPED}:
             text = delivery.text if delivery else detail or reason.value
+            if reason is RunReason.REVIEW_REQUIRED:
+                text = f"待人工验收 · {text}"
             self.db.execute("""INSERT INTO notices(agent_id, task_id, kind, text)
                 SELECT agent_id, id, ?, ? FROM tasks WHERE id = ?""", (state, text, task_id))
 
@@ -471,6 +477,18 @@ class TaskStore:
                     self._close_delegations(run.task_id, reason, detail)
                     self._end(run.task_id, run.id, state, reason, detail, delivery, checks)
 
+    def review(self, task: Task, approved: bool, note: str) -> None:
+        if task.reason is not RunReason.REVIEW_REQUIRED or task.state is not TaskState.WAITING or not task.delivery:
+            raise ValueError("Task has no delivery pending review")
+        if type(approved) is not bool or (not approved and not note.strip()):
+            raise ValueError("Rejecting a delivery requires feedback")
+        with self.transaction():
+            self._entry(task.id, None, "review", approved=approved, note=note)
+            if approved:
+                self._end(task.id, None, TaskState.COMPLETED, RunReason.COMPLETED, note, task.delivery)
+            else:
+                self.follow_up(task, uuid4().hex, note)
+
     def stop(self, task_id: str) -> None:
         if self.task(task_id).state not in (TaskState.QUEUED, TaskState.RUNNING, TaskState.WAITING):
             return
@@ -491,7 +509,7 @@ class TaskStore:
                        verifications = verifications + ?, compactions = compactions + ? WHERE id = ?""",
                     (budget.model_calls, budget.tool_calls, budget.verifications, budget.compactions, task_id),
                 )
-            self.db.execute("UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL WHERE id = ?", (task_id,))
+            self.db.execute("UPDATE tasks SET state = 'queued', reason = NULL, detail = NULL, delivery = NULL WHERE id = ?", (task_id,))
             self._entry(task_id, None, "resumed", budget=asdict(budget) if budget else None)
 
     def workspace_started(self, run: Run, workspace_kind: str, base_commit: str | None) -> None:

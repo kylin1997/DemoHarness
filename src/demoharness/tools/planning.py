@@ -41,8 +41,9 @@ _PLAN_SPECS = {
 
 
 class PlanningTools(FileTools):
-    def __init__(self, workspace: Workspace, capabilities, acceptance, store: TaskStore, run: Run):
-        super().__init__(workspace, capabilities, acceptance)
+    def __init__(self, workspace: Workspace, capabilities, acceptance, store: TaskStore, run: Run,
+                 *, tools=(), verifiers=()):
+        super().__init__(workspace, capabilities, acceptance, tools, verifiers)
         self.store = store
         self.run = run
 

@@ -12,14 +12,18 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .core.task import parse_check
+from .demo import demo_agent
 from .providers.openai import make_openai_stream_fn
 from .runtime import AgentDefinition, AgentRuntime
 
 
 def _definitions(args) -> list[AgentDefinition]:
+    if args.demo:
+        return [demo_agent(args.agent, args.project)]
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
-        raise ValueError("请设置 OPENAI_API_KEY，或先运行 README 的无凭据示例。")
+        raise ValueError("请设置 OPENAI_API_KEY，或加 --demo 使用无凭据教学模式。")
     complete = make_openai_stream_fn(key, os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     model = os.environ.get("MODEL", "gpt-4o")
     if args.config:
@@ -35,12 +39,16 @@ def _definitions(args) -> list[AgentDefinition]:
         if not isinstance(agent_id, str) or not agent_id or any(c not in
                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in agent_id):
             raise ValueError("Agent ID 仅允许字母、数字、连字符和下划线")
+        event_paths = config.get("event_write_paths", [])
+        if not isinstance(event_paths, list) or any(not isinstance(path, str) for path in event_paths):
+            raise ValueError("event_write_paths 必须是文件路径列表")
         root = config_root / config.get("root", agent_id)
         prompt = "\n\n".join((root / name).read_text(encoding="utf-8")
                              for name in ("SOUL.md", "AGENTS.md") if (root / name).is_file())
         definitions.append(AgentDefinition(
             agent_id, config_root / config["project"], config.get("model", model), complete,
             system_prompt=prompt, proactive_writes=config.get("proactive_writes", False),
+            event_write_paths=frozenset(event_paths),
         ))
     return definitions
 
@@ -72,9 +80,29 @@ async def _print_notices(agent):
             print(f"[{agent.id}] {notice.text}", flush=True)
 
 
+async def _change_contract(agent, command: str) -> None:
+    task_id, _, text = command.partition(" ")
+    update = json.loads(text)
+    if not isinstance(update, dict) or not update or set(update) - {"goal", "acceptance"}:
+        raise ValueError("用法为 /contract TASK JSON，支持 goal 和 acceptance")
+    goal = update.get("goal")
+    if "goal" in update and not isinstance(goal, str):
+        raise ValueError("goal 必须是文本")
+    checks = None
+    if "acceptance" in update:
+        recipes = update["acceptance"]
+        if not isinstance(recipes, list) or any(not isinstance(recipe, dict) for recipe in recipes):
+            raise ValueError("acceptance 必须是验收条件列表")
+        try:
+            checks = [parse_check(recipe) for recipe in recipes]
+        except (AttributeError, TypeError) as error:
+            raise ValueError(f"验收条件格式错误：{error}") from error
+    await agent.send(f"更新任务约定 {text}", task_id=task_id, goal=goal, acceptance=checks)
+
+
 async def _chat(args):
     definitions = _definitions(args)
-    async with AgentRuntime.open(args.state_dir, definitions) as runtime:
+    async with AgentRuntime.open(args.state_dir, definitions, observe=not args.demo) as runtime:
         agent = runtime.agent(args.agent)
         printers = [asyncio.create_task(_print_notices(runtime.agent(d.id))) for d in definitions]
         try:
@@ -87,21 +115,39 @@ async def _chat(args):
                     if command == "/exit":
                         break
                     if command == "/help":
-                        print("/agent ID · /tasks · /show TASK · /history TASK [CHILD] · /tell TASK MESSAGE · "
+                        print("/agent ID · /tasks · /show TASK · /plan TASK · /history TASK [CHILD] · "
+                              "/tell TASK MESSAGE · /contract TASK JSON · /event SOURCE ID TEXT · "
+                              "/review TASK approve|revise [NOTE] · "
                               "/allow TASK PATH... · /stop TASK · /resume TASK · /memory · /remember TEXT · "
                               "/correct ID VERSION TEXT · /forget ID · /exit", flush=True)
                     elif command == "/agent":
                         agent = runtime.agent(value)
                     elif command == "/tasks":
-                        _show([{"id": t.id, "goal": t.goal, "state": t.state} for t in agent.tasks()])
+                        _show([{"id": t.id, "goal": t.goal, "state": t.state, "reason": t.reason}
+                               for t in agent.tasks()])
                     elif command == "/show":
                         _show(asdict(agent.task(value)))
+                    elif command == "/plan":
+                        _show(asdict(agent.task(value).plan))
                     elif command == "/history":
                         task_id, _, child_id = value.partition(" ")
                         _show([asdict(entry) for entry in agent.history(task_id, delegation_id=child_id or None)])
                     elif command == "/tell":
                         task_id, _, message = value.partition(" ")
                         await agent.send(message, task_id=task_id)
+                    elif command == "/contract":
+                        await _change_contract(agent, value)
+                    elif command == "/event":
+                        event = value.split(maxsplit=2)
+                        if len(event) != 3:
+                            raise ValueError("用法为 /event SOURCE ID TEXT")
+                        await agent.receive_event(*event)
+                    elif command == "/review":
+                        review = value.split(maxsplit=2)
+                        if len(review) < 2 or review[1] not in {"approve", "revise"}:
+                            raise ValueError("用法为 /review TASK approve|revise [NOTE]")
+                        note = review[2] if len(review) == 3 else ""
+                        await agent.review(review[0], approved=review[1] == "approve", note=note)
                     elif command == "/allow":
                         selection = shlex.split(value)
                         if len(selection) < 2:
@@ -141,9 +187,13 @@ def main(argv=None):
     chat = commands.add_parser("chat", help="在本机保持 Agent 运行并接收消息")
     chat.add_argument("agent")
     chat.add_argument("--project", type=Path, default=Path.cwd())
-    chat.add_argument("--state-dir", type=Path, default=Path.home() / ".demoharness")
-    chat.add_argument("--config", type=Path, help="指定包含 agents 列表的 JSON 配置")
+    chat.add_argument("--state-dir", type=Path, help="存放任务记录和工作副本的目录")
+    mode = chat.add_mutually_exclusive_group()
+    mode.add_argument("--config", type=Path, help="指定包含 agents 列表的 JSON 配置")
+    mode.add_argument("--demo", action="store_true", help="使用可控模型演练工作流、事件和验收，无需密钥")
     args = parser.parse_args(argv)
+    if args.state_dir is None:
+        args.state_dir = Path.home() / (".demoharness-demo" if args.demo else ".demoharness")
     try:
         asyncio.run(_chat(args))
     except (KeyError, ValueError, OSError) as exc:

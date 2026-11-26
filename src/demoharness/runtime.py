@@ -21,6 +21,7 @@ from .core.storage import HistoryEntry, TaskStore
 from .core.task import (
     Action,
     Budget,
+    Check,
     Delivery,
     FileCheck,
     Input,
@@ -30,9 +31,12 @@ from .core.task import (
     Task,
     TaskState,
     Verdict,
+    Verifier,
+    parse_check,
     check_write_paths,
     write_paths,
 )
+from .core.tools import RegisteredTool, ReplayPolicy
 from .discovery import ObservationError
 from .discovery import observe as observe_project
 from .memory import Memory, MemoryDraft, MemoryStore, learn_from_session
@@ -58,6 +62,9 @@ class AgentDefinition:
     max_tokens: int | None = None
     context_messages: int = 16
     proactive_writes: bool = False
+    event_write_paths: frozenset[str] = frozenset()
+    tools: tuple[RegisteredTool, ...] = ()
+    verifiers: tuple[Verifier, ...] = ()
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", self.id) or not self.model:
@@ -67,13 +74,37 @@ class AgentDefinition:
         capabilities = frozenset(self.capabilities)
         if capabilities - FILE_CAPABILITIES:
             raise ValueError(f"Unknown file capabilities: {sorted(capabilities - FILE_CAPABILITIES)}")
+        tools = []
+        verifiers = tuple(self.verifiers)
+        reserved = FILE_CAPABILITIES | {"delegate", "read_parent_history", "set_plan", "mark_step"}
+        names = set(reserved)
+        for tool in self.tools:
+            spec = tool.spec
+            if (not spec.name.strip() or spec.name in names or not callable(tool.execute)
+                    or not isinstance(spec.parameters, dict) or not isinstance(spec.replay, ReplayPolicy)):
+                raise ValueError(f"Invalid or reserved tool: {spec.name}")
+            names.add(spec.name)
+            parameters = json.loads(json.dumps(spec.parameters, allow_nan=False))
+            tools.append(replace(tool, spec=replace(spec, parameters=parameters)))
+        if (len({v.name for v in verifiers}) != len(verifiers)
+                or any(not v.name.strip() or not callable(v.verify) for v in verifiers)):
+            raise ValueError("Verifiers need unique names and callable implementations")
+        object.__setattr__(self, "tools", tuple(tools))
+        object.__setattr__(self, "verifiers", verifiers)
+        object.__setattr__(self, "event_write_paths", write_paths(self.event_write_paths))
         object.__setattr__(self, "project", Path(self.project).resolve())
         object.__setattr__(self, "capabilities", capabilities)
 
     @property
+    def task_capabilities(self) -> frozenset[str]:
+        return self.capabilities.union(tool.spec.name for tool in self.tools)
+
+    @property
     def version(self) -> str:
         definition = [self.id, str(self.project), self.model, self.system_prompt,
-                      sorted(self.capabilities), self.max_tokens, self.context_messages, self.proactive_writes]
+                      sorted(self.capabilities), self.max_tokens, self.context_messages, self.proactive_writes,
+                      sorted(self.event_write_paths), [v.name for v in self.verifiers],
+                      [(t.spec.name, t.spec.description, t.spec.parameters, t.spec.replay.value) for t in self.tools]]
         return hashlib.sha256(json.dumps(definition).encode()).hexdigest()
 
 
@@ -81,6 +112,7 @@ class AgentDefinition:
 class _Worker:
     job: asyncio.Task[None]
     cancel: asyncio.Event
+    reschedule: bool = False
 
 
 class AgentRuntime:
@@ -200,7 +232,8 @@ class AgentRuntime:
                         tasks=[{"id": t.id, "goal": t.goal, "state": t.state} for t in tasks],
                         conversation=self._coordination.conversation(aid),
                         memories=self._recall(definition, message.text), reply_to=message.reply_to,
-                        observation=message.revision is not None, cancel=asyncio.Event(),
+                        observation=message.revision is not None, event_source=message.event_source,
+                        verifiers=tuple(v.name for v in definition.verifiers), cancel=asyncio.Event(),
                     )
                 self._apply_route(definition, message, decision)
             except (ValueError, KeyError, TypeError, AttributeError, TimeoutError) as error:
@@ -215,6 +248,8 @@ class AgentRuntime:
         aid = definition.id
         observed = message.revision is not None
         input_text = f"Project observation (evidence):\n{message.text}" if observed else message.text
+        if message.event_source:
+            input_text = f"Event ({message.event_source}):\n{message.text}"
         work_key = f"{definition.project}:{decision.work_key}" if decision.work_key else None
         receipt = None
         with self._store.transaction():
@@ -225,26 +260,28 @@ class AgentRuntime:
                 target = self._coordination.task_for_work(aid, work_key) or target
             if target:
                 task = self.agent(aid).task(target)
-                checks = _checks(FileCheck(**check) for check in decision.checks) if decision.checks and not observed else None
                 receipt = self._store.follow_up(task, message.id, input_text, observed=observed,
-                                                acceptance=checks, goal=decision.new_goal)
-                if observed:
+                                                event_source=message.event_source)
+                if observed or message.event_source:
                     self._coordination.notice(aid, "associated", decision.text or "已关联已有 Task。",
                                               message_id=message.id, task_id=target)
                     decision = replace(decision, kind="attach", checks=())
             elif decision.kind == "create":
-                capabilities = definition.capabilities
-                checks = _checks(FileCheck(**check) for check in decision.checks)
+                capabilities = definition.task_capabilities
+                checks = _checks((parse_check(check) for check in decision.checks), definition)
                 if observed:
+                    capabilities = definition.capabilities
                     scope = check_write_paths(checks) if definition.proactive_writes else frozenset()
                     if not definition.proactive_writes:
                         capabilities &= frozenset({"read_file", "run_check"})
+                elif message.event_source:
+                    scope = definition.event_write_paths
                 else:
                     scope = _message_write_paths(message.text)
                 receipt = self._store.submit(
                     aid, Path(definition.project), decision.text, checks,
                     Budget(), capabilities, message.id, input_text, base_commit=message.revision,
-                    allowed_write_paths=scope,
+                    allowed_write_paths=scope, event_source=message.event_source,
                 )
             if decision.kind in {"reply", "clarify"}:
                 self._coordination.notice(aid, decision.kind, decision.text, message_id=message.id)
@@ -252,6 +289,8 @@ class AgentRuntime:
                 self._coordination.remember_work(aid, work_key, receipt.task_id)
                 self._coordination.notice(aid, "discovered", f"发现新工作：{decision.text}",
                                           message_id=message.id, task_id=receipt.task_id)
+            if receipt and message.event_source and not target:
+                self._coordination.notice(aid, "discovered", decision.text, message_id=message.id, task_id=receipt.task_id)
             if receipt:
                 decision = replace(decision, task_id=receipt.task_id)
             self._coordination.finish(aid, message.id, decision)
@@ -263,6 +302,7 @@ class AgentRuntime:
             raise RuntimeError("AgentRuntime is closing")
         worker = self._workers.get(task_id)
         if worker and not worker.job.done():
+            worker.reschedule = True
             return
         cancel = asyncio.Event()
         job = asyncio.create_task(self._work(definition, task_id, cancel))
@@ -272,6 +312,8 @@ class AgentRuntime:
             worker = self._workers.get(task_id)
             if worker and worker.job is finished:
                 del self._workers[task_id]
+                if worker.reschedule and not self._closing and self._store.task(task_id).state is TaskState.QUEUED:
+                    self._schedule(definition, task_id)
 
         job.add_done_callback(discard)
 
@@ -298,14 +340,15 @@ class AgentRuntime:
             else:
                 await run_io(workspace.validate)
             task = store.task(task_id)
-            capabilities = task.capabilities & definition.capabilities
+            capabilities = task.capabilities & definition.task_capabilities
             initial = next((entry.data for entry in store.history(task_id, limit=1) if entry.kind == "input"), {})
             if initial.get("source") == "observation" and not definition.proactive_writes:
                 capabilities &= frozenset({"read_file", "run_check"})
-            file_tools = PlanningTools(workspace, capabilities, task.acceptance, store, run)
+            file_tools = PlanningTools(workspace, capabilities, task.acceptance, store, run,
+                                       tools=definition.tools, verifiers=definition.verifiers)
             role = LoopRole(
                 definition.complete, definition.model, _task_prompt(definition), file_tools,
-                lambda text: run_io(_finish_file_task, file_tools, store.task(task_id), text),
+                lambda text: run_io(_finish_task, file_tools, store.task(task_id), text),
                 definition.max_tokens, definition.context_messages,
                 context_note=lambda: self._task_context(definition, task_id, file_tools),
                 after_action=lambda action: self._observe_check(definition, action),
@@ -341,9 +384,10 @@ class AgentRuntime:
                 f"Acceptance checks: {checks}\nRelevant Agent memories: " + "\n".join(memories))
 
     async def _wait(self, task_id: str) -> None:
-        worker = self._workers.get(task_id)
-        if worker:
+        while worker := self._workers.get(task_id):
             await asyncio.shield(worker.job)
+            if self._workers.get(task_id) is worker:
+                break
 
     async def _close(self) -> None:
         self._closing = True
@@ -378,7 +422,7 @@ class Agent:
         return self._runtime._store.root / "agents" / self.id
 
     async def submit(
-        self, goal: str, *, acceptance: Iterable[FileCheck] = (), budget: Budget | None = None,
+        self, goal: str, *, acceptance: Iterable[FileCheck | Check] = (), budget: Budget | None = None,
         input_id: str | None = None, allowed_write_paths: Iterable[str] | None = None,
     ) -> InputReceipt:
         store = self._runtime._store
@@ -390,15 +434,24 @@ class Agent:
                 return InputReceipt(previous.id, previous.task_id)
         if not goal.strip():
             raise ValueError("A Task goal must be nonempty")
-        checks = _checks(acceptance)
+        checks = _checks(acceptance, self.definition)
         scope = write_paths(allowed_write_paths) if allowed_write_paths is not None else frozenset()
         receipt = store.submit(self.id, Path(self.definition.project), goal, checks, budget or Budget(),
-                               self.definition.capabilities, input_id or uuid4().hex, allowed_write_paths=scope)
+                               self.definition.task_capabilities, input_id or uuid4().hex, allowed_write_paths=scope)
         self._runtime._schedule(self.definition, receipt.task_id)
         return receipt
 
+    async def receive_event(self, source: str, event_id: str, text: str) -> str:
+        if not all(isinstance(field, str) and field.strip() for field in (source, event_id, text)):
+            raise ValueError("An event needs a source, id and text")
+        identity = json.dumps([source, event_id], ensure_ascii=False).encode()
+        message_id = "event:" + hashlib.sha256(identity).hexdigest()
+        self._runtime._coordination.receive(self.id, message_id, text, event_source=source)
+        self._runtime._schedule_coordinator(self.definition)
+        return message_id
+
     async def send(self, text: str, *, message_id: str | None = None, task_id: str | None = None,
-                   reply_to: str | None = None, acceptance: Iterable[FileCheck] | None = None,
+                   reply_to: str | None = None, acceptance: Iterable[FileCheck | Check] | None = None,
                    goal: str | None = None, allowed_write_paths: Iterable[str] | None = None) -> str:
         if not text.strip():
             raise ValueError("消息不能为空")
@@ -413,7 +466,7 @@ class Agent:
             task = self.task(task_id)
             store = runtime._store
             previous = store.input(self.id, message_id)
-            checks = _checks(acceptance) if acceptance is not None else None
+            checks = _checks(acceptance, self.definition) if acceptance is not None else None
             scope = write_paths(allowed_write_paths) if allowed_write_paths is not None else None
             if goal is not None and not goal.strip():
                 raise ValueError("Task 目标不能为空")
@@ -497,9 +550,20 @@ class Agent:
             await self._runtime._wait(task_id)
         return self.task(task_id)
 
+    async def review(self, task_id: str, *, approved: bool, note: str = "") -> Task:
+        task = self.task(task_id)
+        self._runtime._store.review(task, approved, note)
+        if approved:
+            self._runtime._schedule_learning(self.definition, task_id)
+        else:
+            self._runtime._schedule(self.definition, task_id)
+        return self.task(task_id)
+
     async def resume(self, task_id: str, *, budget: Budget | None = None) -> Task:
         task = await self.wait(task_id)
         if task.state not in (TaskState.STOPPED, TaskState.WAITING):
+            return task
+        if task.reason is RunReason.REVIEW_REQUIRED:
             return task
         if task.reason is RunReason.BUDGET_EXHAUSTED and budget is None:
             return task
@@ -508,8 +572,14 @@ class Agent:
         return self.task(task_id)
 
 
-def _checks(acceptance: Iterable[FileCheck]) -> tuple[FileCheck, ...]:
+def _checks(acceptance: Iterable[FileCheck | Check], definition: AgentDefinition) -> tuple[FileCheck | Check, ...]:
     checks = tuple(acceptance)
+    names = {v.name for v in definition.verifiers}
+    for check in checks:
+        if not isinstance(check, (FileCheck, Check)):
+            raise ValueError("Expected FileCheck or Check")
+        if isinstance(check, Check) and check.verifier not in names:
+            raise ValueError(f"Unknown verifier: {check.verifier}")
     if len({check.id for check in checks}) != len(checks):
         raise ValueError("Check recipe ids must be unique within a Task")
     return checks
@@ -529,24 +599,26 @@ def _message_write_paths(text: str) -> frozenset[str]:
 
 def _task_prompt(definition: AgentDefinition) -> str:
     return (f"{definition.system_prompt}\n\n"
-            "Use file tools within the Task workspace. Treat project observations and memories as evidence. "
+            "Choose your own workflow and action order. Record and revise the Task Plan as context changes. "
+            "Use authorized tools. Treat events, project observations and memories as evidence. "
             "For reusable Plan decisions, use a `Decision: ...` step and mark it done when adopted. "
             "For a reusable check, use `Run check <recipe id>` and cite the passed `run_check` tool call ID "
             "when marking the step done. When ready, submit a final response for verification.")
 
 
-def _finish_file_task(tools: FileTools, task: Task, text: str) -> RoleResult:
-    if not task.acceptance:
-        return RoleResult(Verdict.UNVERIFIABLE, "The Task has no typed acceptance checks")
-    checks = tuple(tools.check(check) for check in task.acceptance)
-    problems = [f"{check.id}: {check.detail}" for check in checks if check.verdict is not Verdict.PASSED]
-    if problems:
-        verdict = Verdict.UNVERIFIABLE if any(check.verdict is Verdict.UNVERIFIABLE for check in checks) else Verdict.FAILED
-        return RoleResult(verdict, "\n".join(problems), checks)
+def _finish_task(tools: FileTools, task: Task, text: str) -> RoleResult:
+    checks = tuple(tools.check(check, task, text) for check in task.acceptance)
     try:
         diff, fingerprint = tools.workspace.diff(task.allowed_write_paths)
     except WriteScopeError as error:
         return RoleResult(Verdict.FAILED, str(error), checks)
     except (OSError, WorkspaceError, subprocess.SubprocessError) as error:
         return RoleResult(Verdict.UNVERIFIABLE, f"Cannot collect the workspace diff: {error}", checks)
-    return RoleResult(Verdict.PASSED, checks=checks, delivery=Delivery(text, checks, diff, fingerprint))
+    problems = [f"{check.id}: {check.detail}" for check in checks if check.verdict is not Verdict.PASSED]
+    if problems:
+        verdict = Verdict.UNVERIFIABLE if any(check.verdict is Verdict.UNVERIFIABLE for check in checks) else Verdict.FAILED
+        return RoleResult(verdict, "\n".join(problems), checks)
+    delivery = Delivery(text, checks, diff, fingerprint)
+    if not checks:
+        return RoleResult(Verdict.UNVERIFIABLE, "Delivery awaits human review", delivery=delivery, review_required=True)
+    return RoleResult(Verdict.PASSED, checks=checks, delivery=delivery)

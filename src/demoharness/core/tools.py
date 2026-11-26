@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
@@ -44,6 +45,12 @@ class ToolResult:
     content: str                  # 模型看到的结果文本
     details: dict | None = None   # 结构化详情，保存在 Session 历史中
     is_error: bool = False
+
+
+@dataclass(frozen=True)
+class RegisteredTool:
+    spec: ToolSpec
+    execute: Callable[[dict], ToolResult]
 
 
 _SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}

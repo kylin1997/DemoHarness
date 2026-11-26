@@ -51,6 +51,7 @@ class RoleResult:
     detail: str = ""
     checks: tuple[CheckEvidence, ...] = ()
     delivery: Delivery | None = None
+    review_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,9 @@ async def _verify(store: TaskStore, run: Run, role: LoopRole, proposal: HistoryE
     if run.delegation_id is None and store.latest_input(run.task_id) > proposal.id:
         store.record(run, "verification_superseded", proposal_id=proposal.id, checks=[asdict(c) for c in verdict.checks])
         return True
-    if verdict.verdict is Verdict.PASSED:
+    if verdict.review_required:
+        store.end(run, TaskState.WAITING, RunReason.REVIEW_REQUIRED, verdict.detail, delivery=verdict.delivery)
+    elif verdict.verdict is Verdict.PASSED:
         store.end(run, TaskState.COMPLETED, RunReason.COMPLETED, delivery=verdict.delivery, checks=verdict.checks)
     elif verdict.verdict is Verdict.UNVERIFIABLE:
         store.end(run, TaskState.WAITING, RunReason.UNVERIFIABLE, verdict.detail, checks=verdict.checks)

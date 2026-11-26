@@ -8,11 +8,17 @@ uv run python examples/super_agent_demo.py
 
 ## 消息如何找到 Task
 
-不带 Task ID 的 `Agent.send()` 先把输入写入协调日志。协调器给模型提供最近的对话、候选 Task 和相关记忆，检查返回的决定，再执行回复、澄清、创建或关联。指定 `task_id` 的补充直接进该 Task 的 Session。`submit()` 适合程序调用方已经知道目标和验收条件的情况。 [消息路由](../src/demoharness/coordination.py) · [Agent API](../src/demoharness/runtime.py)
+不带 Task ID 的 `Agent.send()` 与 `Agent.receive_event()` 都先把输入写入协调日志。协调器给模型提供近期对话、候选 Task 和相关记忆，再保存回复、澄清、创建、关联或忽略的决定。指定 `task_id` 的补充直接进该 Task 的 Session。`submit()` 适合程序调用方已经知道目标和验收条件的情况。 [消息路由](../src/demoharness/coordination.py) · [Agent API](../src/demoharness/runtime.py)
 
-示例给同一个 Agent 发两条不带 Task ID 的消息。第一条用 `授权写入：a.txt | ...` 请求创建 A。A 等模型时，B 通过 `submit()` 独立完成。第二条消息说「把工作 A 的 a.txt 改成一行『新要求』」，协调器将它关联到 A，并更新验收。对照输出中的两条消息 ID，可以看到它们进入同一个 Task 和 Session。 [综合示例](../examples/super_agent_demo.py)
+示例给同一个 Agent 发送一条 `授权写入：a.txt | ...` 消息，协调器据此创建 A。A 等模型时，B 通过 `submit()` 独立完成。用户随后带 A 的 Task ID 发送新要求，并显式提交新的验收条件。对照输出中的输入 ID，可以看到两次输入进入同一个 Task 和 Session。 [综合示例](../examples/super_agent_demo.py)
 
 Worker 会在动作边界读取补充。示例中，A 的旧模型响应在补充入库后才返回，Session 记录一条 `stale_response`，旧写入没有进入动作队列。新的模型调用将 Plan 从版本 1 修订到 2，输出会显示修订原因、过时响应的条目 ID 和唯一一次实际写入。对已完成的 Task 明确发起跟进时，系统也会保留历史交付并开始新的 Run。 [执行与交付](task-execution.md)
+
+## 通用事件怎样触发工作
+
+调用 `Agent.receive_event(source, event_id, text)`，或在 CLI 输入 `/event SOURCE ID TEXT`。同一个 Agent 按事件来源和 ID 去重。关联到已有 Task 后，事件作为新的 Session 输入，Agent 可以据此调整 Plan 或继续执行。已完成或主动停止的 Task 保留关联记录。明确修改目标或验收条件时，可用 CLI 的 `/contract` 或 Python 的 `Agent.send(..., task_id=..., goal=..., acceptance=...)`。
+
+事件触发的工作使用宿主预先注册的工具。通用事件可写的文件路径来自 `AgentDefinition.event_write_paths`，已关联的 Task 沿用原授权。 [教学 CLI 事件演练](../examples/README.md#操作教学-cli)
 
 ## 子 Agent 接手小块调查
 
@@ -28,7 +34,7 @@ Worker 会在动作边界读取补充。示例中，A 的旧模型响应在补�
 
 ## Git 提交如何变成工作
 
-Git 观察器记录源项目的提交，从有限的路径和文本证据开始，之后按 HEAD 变化处理。工作副本的输出留在副本里。源项目出现提交后，如果变更文件的路径、模式和前后对象 ID 与已有交付匹配，宿主会关联原 Task。其他变更交由协调器决定忽略、关联或建新 Task，问题键用于合并重复工作。决定、Task 变更和通知在同一事务落盘。 [Git 观察](../src/demoharness/discovery.py) · [观察与分派](../src/demoharness/runtime.py)
+运行时定时读取本地源项目的 `HEAD`。首次读取时收集已提交快照里的路径和文本证据，之后在 `HEAD` 变化时收集变更证据。工作副本的输出留在副本里。源项目出现提交后，如果变更文件的路径、模式和前后对象 ID 与已有交付匹配，宿主会关联原 Task。其他变更交由协调器决定忽略、关联或建新 Task，问题键用于合并重复工作。决定、Task 变更和通知在同一事务落盘。 [Git 提交读取](../src/demoharness/discovery.py) · [轮询与分派](../src/demoharness/runtime.py)
 
 观察触发的新 Task 默认可以读取和执行内置检查。项目可明确启用 `proactive_writes`，授权这类任务写入验收项指定的文件。关联观察不会自行恢复主动停止的 Task。
 

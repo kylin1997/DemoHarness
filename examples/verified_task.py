@@ -55,11 +55,25 @@ async def run(root: Path, live: bool):
             acceptance=[FileCheck("report.md", equals=CONTENT)],
         )
         task = await agent.wait(receipt.task_id)
+        action_names = {action.id: action.call.name for action in agent.actions(task.id)}
+        print("执行轨迹")
+        for entry in agent.history(task.id):
+            if entry.kind in {"action_pending", "action_started", "action_result"}:
+                print(f"  {entry.kind} ({action_names[entry.data['action_id']]})")
+            elif entry.kind == "assistant" and entry.data["proposal"]:
+                print(f"  {entry.kind} (完成提议)")
+            else:
+                print(f"  {entry.kind}")
         if task.state is not TaskState.COMPLETED:
             raise SystemExit(f"验收失败：{task.state} {task.detail}")
         print(f"Task {task.id} 已完成，Session {task.session_id}")
         print((task.workspace / "report.md").read_text(encoding="utf-8"), end="")
-        print(f"验收与差异：{task.delivery}")
+        assert task.delivery is not None
+        print("验收证据")
+        for check in task.delivery.checks:
+            print(f"  {check.path} {check.verdict} sha256={check.sha256}")
+        print("Git 差异")
+        print(task.delivery.diff, end="")
         assert not (project / "report.md").exists(), "原始仓库不应被修改"
 
 

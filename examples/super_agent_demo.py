@@ -61,9 +61,6 @@ class DemoModel:
             return {"kind": "skip"}
         if text == A_REQUEST:
             return {"kind": "create", "text": A_GOAL, "checks": [{"path": "a.txt", "equals": A_ORIGINAL}]}
-        if text == A_FOLLOW_UP:
-            target = next(task for task in context["tasks"] if task["goal"] == A_GOAL)
-            return {"kind": "attach", "task_id": target["id"], "checks": [{"path": "a.txt", "equals": A_UPDATED}]}
         return {"kind": "clarify", "text": "请说明这条消息属于哪件事。"}
 
     async def __call__(self, request, cancel):
@@ -123,11 +120,13 @@ async def run(root: Path):
         task_b = await asyncio.wait_for(agent.wait(b.task_id), 8)
         assert task_b.state is TaskState.COMPLETED
         print(f"B 已交付 · Task {task_b.id}。此时 A 仍在等待模型。")
-        follow_up = await send_and_wait_for_route(agent, A_FOLLOW_UP)
+        follow_up_id = await agent.send(A_FOLLOW_UP, task_id=initial_a.id,
+                                        acceptance=[FileCheck("a.txt", equals=A_UPDATED)])
+        follow_up = agent.input(follow_up_id)
         assert follow_up.task_id == initial_a.id
         follow_up_entry = next(entry for entry in agent.history(initial_a.id)
                                if entry.kind == "input" and entry.data["input_id"] == follow_up.id)
-        print(f"协调器关联补充消息 {follow_up.id} · Task {follow_up.task_id} · "
+        print(f"用户更新验收并关联补充消息 {follow_up.id} · Task {follow_up.task_id} · "
               f"Session {initial_a.session_id} 条目 {follow_up_entry.id}")
         model.release_a.set()
         task_a = await asyncio.wait_for(agent.wait(initial_a.id), 8)

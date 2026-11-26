@@ -205,7 +205,8 @@ def learn_from_session(
                     session_checks[action.id] = session_checks[source] = proof
             drafts = [MemoryDraft(
                 "experience", f"check:{check['id']}",
-                f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。",
+                (f"项目文件 {check['path']} 可以用验收项 {check['id']} 校验。此次检查通过。"
+                 if check.get("path") else f"验收项 {check['id']} 已通过：{check['detail']}"),
                 (source,), evidence="verified", valid_until=valid_until,
             ) for check in checks if check.get("verdict") == Verdict.PASSED]
         elif entry.kind == "plan_revised" and entry.run_id is not None:
