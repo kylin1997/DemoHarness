@@ -1,0 +1,302 @@
+"use strict";
+
+const sourceRoot = "../../../src/demoharness/";
+
+const modules = {
+  web: {
+    title: "Web UI", symbol: "HTML / JS / CSS", file: "web/app.js", type: "interface",
+    graph: [118, 66], role: "交互与事件展示",
+    description: "浏览器发起对话、消费 SSE，把输出、审批、工具时序和上下文变化绘制到同一运行视图。",
+    members: [
+      ["POST /api/chat", "发送当前 Session、模型档案、推理强度和运行模式。"],
+      ["SSE", "解析 delta、approval、context、compaction、done 等事件并更新视图。"],
+      ["POST /api/approve", "把允许本次、信任命令或拒绝的决定送回已暂停的运行。"],
+    ],
+    files: [["app.js", "web/app.js"], ["index.html", "web/index.html"], ["styles.css", "web/styles.css"]],
+  },
+  application: {
+    title: "Application", symbol: "class", file: "application.py", type: "entry",
+    graph: [339, 66], role: "启动、装配与网络入口",
+    description: "应用入口集中负责配置、组件的生命周期和 HTTP 路由。一次对话的五阶段由 DemoHarness 管理。",
+    members: [
+      ["__init__(state_dir, workspace, skills_dir, config_path)", "读取配置、确定工作区，打开会话 SQLite 数据库。"],
+      ["_lifecycle(app)", "启动 MCP 并在退出时关闭连接。初始化连接 Store、模型、Registry、Guardrails 和 Skills，构造 DemoHarness。"],
+      ["make_app() / chat(request) / approve(request)", "提供页面与会话接口、对话事件流和独立审批路由。"],
+    ],
+  },
+  cli: {
+    title: "CLI", symbol: "entry point", file: "cli.py", type: "entry",
+    graph: [560, 66], role: "命令行启动",
+    description: "安装包后，demoharness serve 从命令行启动本地应用。可通过 python -m demoharness 进入同一个 CLI。",
+    members: [
+      ["demoharness serve", "启动本地 Web 应用。"],
+      ["__main__.py", "将 Python 模块入口交给 CLI。"],
+    ],
+    files: [["cli.py", "cli.py"], ["__main__.py", "__main__.py"]],
+  },
+  skills: {
+    title: "Skills", symbol: "class", file: "skills.py", type: "context",
+    graph: [118, 188], role: "教学技能的分层读取",
+    description: "启动时读取本地 SKILL.md。运行时把简短索引和命中的完整说明放入构建出的模型上下文。",
+    members: [
+      ["index()", "生成简短技能目录。"],
+      ["match_input(message)", "匹配输入的触发词，返回要注入的技能名和正文（L2）。"],
+    ],
+  },
+  harness: {
+    title: "DemoHarness", symbol: "class", file: "harness.py", type: "core",
+    graph: [339, 188], role: "一次对话的五阶段",
+    description: "把输入、上下文、循环、输出和收尾编排成一次可观察的运行，并负责附带 Session 和 Run 信息的事件。",
+    members: [
+      ["chat(session_id, message, options, emit)", "Session ID 选定会话，message 是新输入，options 选模型和模式，emit 把事件交回应用。"],
+      ["_Turn.compact()", "窗口超过 16 条触发摘要，保留至少最近 6 条，并保护工具往返与当前任务。"],
+      ["持久化", "记录会话消息、上下文窗口和可回放事件。delta 随 SSE 回传。"],
+    ],
+  },
+  state: {
+    title: "Store", symbol: "class", file: "state.py", type: "context",
+    graph: [560, 188], role: "SQLite 会话状态",
+    description: "集中持久化会话选项、对话历史、模型窗口、运行事件、记忆和审批信任。",
+    members: [
+      ["messages() / window()", "完整对话服务于 UI，模型窗口可以独立压缩。"],
+      ["append_event() / events()", "追加运行事件，支持会话回放。"],
+      ["remember() / recall()", "保存或查找会话记忆。"],
+      ["is_trusted() / trust()", "按会话和精确命令签名检查或保存信任。"],
+    ],
+  },
+  models: {
+    title: "模型适配器", symbol: "2 classes", file: "models.py", type: "interface",
+    graph: [118, 310], role: "统一的模型流式协议",
+    description: "真实模型和本地演示模型实现同一个 chat_stream 接口，运行时可通过模型档案切换。",
+    members: [
+      ["OpenAiChatModel", "读取 OpenAI 兼容 SSE，拼接分片工具参数，返回 ModelReply。"],
+      ["ScriptedChatModel", "离线复现工具搜索、命令审批、子代理和计划模式。"],
+      ["chat_stream(...)", "通过 on_delta 通知文本片段，返回最终文本、工具调用和用量。"],
+    ],
+  },
+  loop: {
+    title: "agent_loop", symbol: "async function", file: "agent_loop.py", type: "core",
+    graph: [339, 310], role: "短小、有界的决策循环",
+    description: "模型给出工具调用，运行时执行并把结果写入上下文，然后继续询问模型，直到收敛或触发运行上限。",
+    members: [
+      ["agent_loop(messages, revealed, think, act, max_rounds=…)", "think 回传模型结果，act 回传工具观察，每个观察的 tool_call_id 对应原始 ToolCall.id。"],
+      ["if not reply.calls: return reply", "没有待执行的工具时，把本轮结果交回上层。"],
+      ["LoopLimit", "主循环最多 8 轮，子代理最多 5 轮。最后一轮仍有工具请求时结束，工具不执行。"],
+    ],
+  },
+  guard: {
+    title: "Guardrails", symbol: "class", file: "guardrails.py", type: "guard",
+    graph: [560, 310], role: "输入、工具与输出边界",
+    description: "在输入、工具执行和最终输出三个位置检查请求。命令未匹配放行策略时，可将决定交给人工审批。",
+    members: [
+      ["check_input / check_tool / check_output", "返回空值表示通过，返回文本携带拒绝说明。"],
+      ["invoke_with_approval(session_id, name, args, emit)", "发出 approval 并等待决策，允许返回 None，拒绝返回说明文本。"],
+      ["resolve(session_id, approval_id, decision)", "Session ID 匹配会话，approval_id 精确匹配该次暂停，decision 为 allow、trust 或 deny。"],
+    ],
+  },
+  protocol: {
+    title: "协议信封", symbol: "contracts", file: "protocol.py", type: "context",
+    graph: [118, 432], role: "模型与工具共享的类型",
+    description: "定义模型回复、工具声明、调用与运行上下文，让适配器、循环和工具共享同一种表示。",
+    members: [
+      ["ToolSpec", "描述工具名字、JSON schema 与执行函数。"],
+      ["ToolCall", "包含调用 ID、工具名和参数，关联模型请求和工具结果。"],
+      ["ToolContext", "携带工作区、会话、工具揭示状态与事件回调。"],
+      ["ModelReply / ChatModel", "约定最终回复字段和流式调用接口。"],
+    ],
+  },
+  toolbox: {
+    title: "ToolRegistry", symbol: "class", file: "toolbox.py", type: "guard",
+    graph: [339, 432], role: "工具目录、参数校验与执行",
+    description: "维护工具声明与执行函数。tool_search 按需揭示工具，执行时再次检查可见性、参数和工作区边界。",
+    members: [
+      ["schemas(names)", "将本轮可见的工具转成模型可读的工具 schema。"],
+      ["invoke(name, context, args)", "在工具入口校验参数和授权范围，再执行对应处理函数。"],
+      ["tool_search / read / todo", "每个主会话新回合起始时暴露的三个工具。"],
+    ],
+  },
+  mcp: {
+    title: "StdioMcpClient", symbol: "class", file: "mcp.py", type: "interface",
+    graph: [560, 432], role: "连接本地 MCP 服务",
+    description: "用标准输入输出与已配置的 MCP 子进程通信，并通过工具目录把远端工具并入当前 Registry。",
+    members: [
+      ["initialize / initialized", "在会话开始时协商 MCP 协议。"],
+      ["tools/list", "分页发现工具，转换为当前模型可读的声明。"],
+      ["tools/call", "调用服务器工具，结果回到同一个工具执行循环。"],
+    ],
+  },
+};
+
+const treeOrder = [
+  "application", "harness", "loop", "guard", "models", "toolbox",
+  "state", "skills", "mcp", "protocol", "cli", "web",
+];
+
+const graphEdges = [
+  ["web", "application", "HTTP · SSE"],
+  ["cli", "application", "启动"],
+  ["application", "harness", "装配"],
+  ["harness", "skills", "匹配技能"],
+  ["harness", "state", "读写会话"],
+  ["harness", "loop", "进入循环"],
+  ["loop", "models", "chat_stream"],
+  ["loop", "guard", "校验与审批"],
+  ["loop", "toolbox", "invoke"],
+  ["protocol", "toolbox", "ToolSpec"],
+  ["toolbox", "mcp", "tools/call"],
+];
+
+const chapters = [
+  "", "最小 Agent Loop", "快速体验", "上下文构成", "时间线与 Session",
+  "工具策略与搜索", "计划模式", "SubAgent 与记忆", "历史压缩", "Skills",
+  "MCP 与模型档案", "三层护栏与审批",
+];
+
+// Return messages use the direction of their response, including error observations.
+const stations = [
+  {
+    title: "全景鸟瞰", node: "application", chapters: [1], seconds: 18,
+    description: "从 Web 或命令行进入 Application，再由 DemoHarness 串起模型、工具、护栏和会话。图上的箭头表示依赖或调用方向。",
+    observe: "发送「核对 workspace 里的 notes.md」，在右栏依次找到模型调用、read 和工具结果。",
+    read: "从 Application.chat 跟到 DemoHarness.chat，再找哪个函数把工具结果交回模型。",
+    sources: [["HTTP 入口", "application.py"], ["最小循环", "agent_loop.py"]],
+  },
+  {
+    title: "启动与装配", node: "application", chapters: [2, 4, 10], seconds: 22,
+    description: "Application 负责读取配置并打开会话状态、装配运行组件、提供 HTTP 路由与 SSE。右侧卡片指向对应方法。",
+    observe: "打开页面找到「离线演示」档案。用同一状态目录重启，左栏仍能打开以前的会话。",
+    read: "在 Application.__init__ 找 Store 的状态目录，再看 make_app 注册的页面和 API。",
+    sources: [["装配和路由", "application.py"], ["会话 SQLite", "state.py"]],
+  },
+  {
+    title: "一次对话五阶段", node: "harness", chapters: [3, 4], seconds: 34,
+    description: "按 input → context → loop → output → finish 跟踪一次对话。输入护栏在模型用量产生前拦截，输出护栏在结果交付前检查。",
+    observe: "发送「DEMOHARNESS_BLOCK_INPUT」，观察右栏的输入拦截、聊天里的说明和本轮零模型用量。",
+    read: "在 DemoHarness.chat 找 check_input 后的提前返回。看看哪个阶段没收到调用。",
+    sources: [["五阶段编排", "harness.py"], ["输入与输出护栏", "guardrails.py"]],
+    lanes: ["web", "application", "harness", "guard", "loop", "state"],
+    messages: [
+      ["web", "application", "POST /api/chat", "发起对话", "application"],
+      ["application", "harness", "chat(session, message, options)", "进入编排", "harness"],
+      ["harness", "guard", "check_input(message)", "input", "guard"],
+      ["guard", "harness", "None → 通过 / 拒绝文本 → 收尾", "拦截时跳过模型调用 · 0 模型 Token", "guard", "return"],
+      ["harness", "state", "读取历史、会话选项与窗口", "context · 拼装模型输入", "state"],
+      ["state", "harness", "window() 返回会话上下文", "context · 加入工具 schema 与技能", "harness", "return"],
+      ["harness", "loop", "agent_loop(...) 执行决策", "loop · Plan 模式可先生成计划", "loop"],
+      ["loop", "harness", "返回最终回复", "loop", "harness", "return"],
+      ["harness", "guard", "check_output(text)", "output", "guard"],
+      ["guard", "harness", "None → 可交付 / 文本 → 拒绝说明", "output", "guard", "return"],
+      ["harness", "state", "保存消息、窗口与事件", "finish", "state"],
+      ["application", "web", "SSE done", "finish · 返回用户可见结果", "web", "return"],
+    ],
+  },
+  {
+    title: "模型调用与流式回传", node: "models", chapters: [3, 10], seconds: 32,
+    description: "模型接收 system、可见工具 schema、命中的 L2 Skills、历史和这次新输入。chat_stream 一边处理片段，一边收集最终文本、工具调用和 Token 用量。",
+    observe: "看聊天文字逐段更新，对照右栏上下文组成和模型用量。核对 notes.md 的练习会命中示例技能。",
+    read: "在 _Turn.complete 找 messages、schemas 和回调，再看 _OutputStream.feed 何时发出 delta。",
+    sources: [["模型调用和回调", "harness.py"], ["chat_stream 实现", "models.py"]],
+    lanes: ["web", "application", "loop", "harness", "models", "toolbox"],
+    messages: [
+      ["loop", "harness", "think(round_number, exposed)", "每轮调用编排提供的回调", "loop"],
+      ["harness", "harness", "_Turn.prompt() → messages", "system + L2 Skills + 历史 + 新输入", "harness"],
+      ["harness", "toolbox", "schemas(exposed)", "将可见工具转为 JSON schema", "toolbox"],
+      ["toolbox", "harness", "返回 schemas", "与 messages 一起交给模型", "toolbox", "return"],
+      ["harness", "models", "chat_stream(messages, schemas, on_delta)", "模型请求", "models"],
+      ["models", "harness", "on_delta(text)", "文本片段进入输出检查", "harness", "return"],
+      ["harness", "application", "emit(delta)", "转发可交付片段", "harness", "return"],
+      ["application", "web", "SSE delta {text}", "浏览器更新当前回复", "web", "return"],
+      ["models", "harness", "ModelReply(text, calls, …)", "返回工具调用与 Token 用量", "models", "return"],
+      ["harness", "loop", "返回 ModelReply", "循环检查是否还有工具调用", "loop", "return"],
+    ],
+  },
+  {
+    title: "工具守卫与人工审批", node: "guard", chapters: [5, 11], seconds: 37,
+    description: "工具守卫拒绝时，循环把拒绝说明当作 tool 观察。命令需要人确认时，approval 让浏览器显示选择，审批完成后再决定是否执行。",
+    observe: "发「请用命令打印 hello」。先拒绝，看到错误回填。再发同一句，选允许本次，看到 hello。",
+    read: "找 approval_id 怎么关联页面和等待中的审批，然后看 _Turn.invoke 收到 None 或拒绝文本时分别走哪条分支。",
+    sources: [["审批等待与返回值", "guardrails.py"], ["审批 HTTP 接口", "application.py"]],
+    lanes: ["web", "application", "loop", "harness", "guard", "toolbox"],
+    messages: [
+      ["loop", "harness", "act(call, exposed)", "把模型选择的 ToolCall 交给 _Turn.invoke", "harness"],
+      ["harness", "guard", "check_tool(name, args)", "检查工具请求", "guard"],
+      ["guard", "harness", "拒绝文本 → tool 观察", "守卫拒绝分支 · 跳过执行与审批", "guard", "return"],
+      ["harness", "guard", "invoke_with_approval(...)", "守卫放行且命令需审批的分支", "guard"],
+      ["guard", "application", "emit(approval)", "经运行事件交给 HTTP 层", "guard", "return"],
+      ["application", "web", "SSE approval", "显示允许本次、信任命令和拒绝", "web", "return"],
+      ["web", "application", "POST /api/approve", "session_id、approval_id、allow / trust / deny", "application"],
+      ["application", "guard", "resolve(session_id, approval_id, decision)", "信任按会话和命令签名保存", "guard"],
+      ["application", "web", "HTTP {accepted: true}", "确认收到决定，执行结果经 SSE 回传", "web", "return"],
+      ["guard", "harness", "None（null）→ 通过 / text → 拒绝", "approval_resolved · 拒绝文本写回 tool 观察", "guard", "return"],
+      ["harness", "toolbox", "invoke(name, context, args)", "仅在通过时执行", "toolbox"],
+      ["harness", "loop", "返回结果或拒绝说明", "作为 tool 观察进入下一轮", "loop", "return"],
+    ],
+  },
+  {
+    title: "工具执行与错误自愈", node: "toolbox", chapters: [5, 11], seconds: 28,
+    description: "Registry 在副作用发生前检查工具可见性与参数。失败时模型收到一条可读的工具观察，可以在下一轮调整参数、搜索工具或结束。",
+    observe: "核对 notes.md 时对照 read 调用和结果。如果命令审批被拒，右栏同样会显示带错误标记的工具结果。",
+    read: "从工具结果的 call_id 回找调用，再看 agent_loop 如何把 tool_call_id 和结果同时传给下一轮。",
+    sources: [["工具校验与执行", "toolbox.py"], ["工具观察回填", "agent_loop.py"]],
+    lanes: ["models", "loop", "harness", "toolbox", "web"],
+    messages: [
+      ["models", "loop", "ModelReply.calls → ToolCall", "模型选定工具并给出参数", "models", "return"],
+      ["loop", "harness", "act(call, exposed)", "提供调用 ID、名称及参数", "harness"],
+      ["harness", "toolbox", "invoke(name, context, args)", "守卫通过后进入 Registry", "toolbox"],
+      ["toolbox", "toolbox", "校验可见性、参数和执行边界", "验证通过才触发工具副作用", "toolbox"],
+      ["toolbox", "harness", "返回结果 / 抛出 ToolError", "异常转成可读的错误说明", "toolbox", "return"],
+      ["harness", "web", "SSE tool_result", "经应用层交付结果、call_id 和错误标记", "web", "return"],
+      ["harness", "loop", "返回结果 / 错误说明文本", "两种结果都成为 tool-role 观察", "loop", "return"],
+      ["loop", "models", "chat_stream(messages + tool 观察)", "下一轮决策可纠正操作", "models"],
+    ],
+  },
+  {
+    title: "Loop 收敛与保险丝", node: "loop", chapters: [1, 6], seconds: 27,
+    description: "Plan 模式先请模型生成步骤，再进入相同的工具循环。无工具调用时收敛，到达轮次上限时由保险丝结束运行。",
+    observe: "切到 Plan，发送「请生成一个可执行计划并检查 notes.md」，先查看计划，再找到后续逐轮工具结果。",
+    read: "找 agent_loop 中 reply.calls 为空和 round_number 等于 max_rounds 的两个出口。最后一轮仍有工具请求时会执行吗？",
+    sources: [["收敛和轮次上限", "agent_loop.py"], ["计划与预算设置", "harness.py"]],
+    lanes: ["harness", "loop", "models", "toolbox"],
+    messages: [
+      ["harness", "models", "Plan 模式生成步骤 JSON", "无工具的计划请求", "harness"],
+      ["models", "harness", "返回 steps", "转成可观察的计划", "harness", "return"],
+      ["harness", "loop", "agent_loop(...)", "进入模型、工具和观察循环", "loop"],
+      ["loop", "models", "chat_stream(...)", "在本轮预算内询问模型", "models"],
+      ["models", "loop", "calls 为空 / 有待执行工具", "为空则收敛，有调用则执行", "loop", "return"],
+      ["loop", "toolbox", "invoke(...)", "把工具观察追加到下一轮上下文", "toolbox"],
+      ["loop", "harness", "最终回复 / 轮次上限", "收敛或保险丝触发 · 不再启动新工具", "loop", "return"],
+    ],
+  },
+  {
+    title: "历史压缩 16/6", node: "harness", chapters: [3, 4, 8], seconds: 28,
+    description: "模型窗口超过 16 条时，摘要覆盖较早消息并保留至少最近 6 条。边界若落在一个工具请求与结果组内，会保留整个组。完整聊天历史仍留在 SQLite。",
+    observe: "新建会话连发九条普通消息。对照压缩卡中的前后条数、保留条数和估算 Token，再查看旧聊天。",
+    read: "找 _Turn.compact 里的 16、6 和 split，再读 Store.window 与 Store.messages 的各自用途。",
+    sources: [["压缩触发和切分", "harness.py"], ["模型窗口和聊天记录", "state.py"]],
+    lanes: ["web", "harness", "state", "models"],
+    messages: [
+      ["harness", "state", "window(session_id)", "读取当前模型窗口", "state"],
+      ["state", "harness", "返回窗口消息", "超过 16 条走压缩分支", "harness", "return"],
+      ["harness", "models", "chat_stream(... DEMOHARNESS_COMPACT ...)", "对早期消息请求摘要", "models"],
+      ["models", "harness", "返回摘要", "接上最近 6 条 · 工具请求与观察成组", "harness", "return"],
+      ["harness", "state", "save_window(session_id, compacted)", "写入压缩后的模型窗口", "state"],
+      ["harness", "web", "SSE compaction", "经应用层回传前后条数与 Token 变化", "web", "return"],
+    ],
+  },
+  {
+    title: "MCP/Skills/SubAgent", node: "mcp", chapters: [7, 9, 10], seconds: 24,
+    description: "MCP 把已配置服务器的工具加入 Registry；Skills 给上下文加上命中的说明；SubAgent 在独立上下文中用只读工具查找资料，把结果交回主代理。",
+    observe: "发「让子 Agent 读取 notes.md 并总结」，展开委派卡。核对 notes.md 时看上下文中的匹配技能。配置 MCP 后再观察工具搜索。",
+    read: "分别找工具的 tools/list、技能的 match_input 和子代理的 _Turn.delegate。想一想三种扩展各把什么交给了主循环。",
+    sources: [["MCP 协商与调用", "mcp.py"], ["技能匹配", "skills.py"], ["只读委派", "harness.py"]],
+  },
+  {
+    title: "跑起来", node: "cli", chapters: [2, 5, 11], seconds: 24,
+    description: "从仓库根目录运行下面两条命令并打开本机地址。选择「离线演示」档案即可开始。",
+    observe: "先发「核对 workspace 里的 notes.md」跟踪 read 调用，再发「请用命令打印 hello」体验工具搜索与审批。",
+    read: "首轮工具清单里能找到 run_command 吗？对照 tool_search 之后的清单，再找这个变化由哪里返回。",
+    sources: [["serve 入口", "cli.py"], ["可见工具集合", "toolbox.py"]],
+    commands: ["uv sync --locked", "uv run demoharness serve"],
+    url: "http://127.0.0.1:8765",
+  },
+];

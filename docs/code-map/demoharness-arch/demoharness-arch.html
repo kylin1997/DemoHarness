@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>DemoHarness · 代码地图</title>
+  <link rel="stylesheet" href="map.css">
+  <script defer src="map-data.js"></script>
+  <script defer src="map.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="frame masthead-inner">
+      <a class="brand" href="./demoharness-arch.html" aria-label="DemoHarness 代码地图首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>DemoHarness<span class="version">v2</span></span>
+      </a>
+      <a class="guide-link" href="../../guide.md">教学指南 <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main class="frame">
+    <div class="intro">
+      <div>
+        <h1>代码地图<span class="title-period" aria-hidden="true">.</span></h1>
+      </div>
+      <p>沿着一次对话，读懂 DemoHarness 的装配、工具调用和人工审批。点击任意文件、图节点或卡片定位源码。</p>
+    </div>
+
+    <section class="tour" aria-labelledby="tour-title">
+      <div class="tour-body">
+        <div class="tour-copy">
+          <p id="tour-status" class="tour-status"></p>
+          <h2 id="tour-title"></h2>
+          <p id="tour-description"></p>
+          <dl id="tour-notes" class="tour-notes" hidden>
+            <div><dt>在页面观察</dt><dd id="tour-observe"></dd></div>
+            <div><dt>读源码</dt><dd id="tour-read"></dd></div>
+          </dl>
+          <div id="tour-links" class="tour-links"></div>
+          <div id="tour-commands" class="tour-commands" hidden></div>
+        </div>
+        <div class="tour-controls">
+          <div class="transport" aria-label="导览播放控制">
+            <button type="button" id="tour-prev" class="icon-button" aria-label="上一站" title="上一站">←</button>
+            <button type="button" id="tour-play" class="play-button"></button>
+            <button type="button" id="tour-next" class="icon-button" aria-label="下一站" title="下一站">→</button>
+          </div>
+          <div class="tour-modes">
+            <button type="button" id="tour-free">自由浏览</button>
+            <button type="button" id="tour-restart">从头导览</button>
+          </div>
+        </div>
+      </div>
+      <nav id="tour-track" class="tour-track" aria-label="导览站点"></nav>
+    </section>
+
+    <noscript><p class="noscript">此页面需要 JavaScript 才能同步目录树、架构图和源码卡片。<a href="../../guide.md">打开教学指南</a>。</p></noscript>
+
+    <div id="workspace" class="workspace">
+      <section class="pane tree-pane" aria-labelledby="tree-heading">
+        <header class="pane-header">
+          <h2 id="tree-heading">目录树</h2>
+        </header>
+        <div id="tree-scroll" class="pane-scroll tree-scroll">
+          <div id="tree"></div>
+        </div>
+      </section>
+
+      <section class="pane map-pane" aria-labelledby="map-heading">
+        <header class="pane-header">
+          <h2 id="map-heading">架构图</h2>
+          <div class="view-switch" aria-label="图形视图">
+            <button type="button" id="map-tab" aria-pressed="true">依赖</button>
+            <button type="button" id="sequence-tab" aria-pressed="false" title="第 3 至第 8 站提供调用时序" disabled>时序</button>
+          </div>
+        </header>
+        <div id="map-scroll" class="pane-scroll map-scroll">
+          <div id="graph"></div>
+          <div id="sequence" hidden></div>
+        </div>
+        <footer id="map-legend" class="map-legend"></footer>
+      </section>
+
+      <section class="pane cards-pane" aria-labelledby="cards-heading">
+        <header class="pane-header">
+          <h2 id="cards-heading">源码卡片</h2>
+          <span id="cards-count" class="cards-count"></span>
+        </header>
+        <div id="cards-scroll" class="pane-scroll cards-scroll">
+          <div id="cards"></div>
+        </div>
+      </section>
+
+      <svg id="pointer" class="pointer" aria-hidden="true">
+        <defs>
+          <marker id="pointer-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 1 1 L 9 5 L 1 9"></path>
+          </marker>
+        </defs>
+        <path id="pointer-path" marker-end="url(#pointer-arrow)"></path>
+      </svg>
+    </div>
+
+    <footer class="page-footer">
+      <span>DemoHarness <span aria-hidden="true">/</span> 代码地图</span>
+      <a href="../../../README.md">项目 README <span aria-hidden="true">↗</span></a>
+    </footer>
+  </main>
+</body>
+</html>
