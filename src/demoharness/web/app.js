@@ -172,17 +172,23 @@ function hydrate(record, messages, events) {
   }
   record.runs = [...runs.values()];
   record.turns = [];
+  const turnsByRun = new Map();
   let turn;
   for (const message of messages) {
     if (message.role === 'user') {
-      turn = { prompt: displayValue(message.content), reply: null, run: record.runs[record.turns.length], pending: false };
+      const run = message.run_id ? runs.get(message.run_id) : record.runs[record.turns.length];
+      turn = { prompt: displayValue(message.content), reply: null, run, pending: false };
       record.turns.push(turn);
+      if (message.run_id) turnsByRun.set(message.run_id, turn);
     } else if (message.role === 'assistant') {
-      if (!turn) {
+      const owner = message.run_id ? turnsByRun.get(message.run_id) : turn;
+      if (owner) {
+        owner.reply = displayValue(message.content);
+      } else {
         turn = { prompt: null, run: null, pending: false };
         record.turns.push(turn);
+        turn.reply = displayValue(message.content);
       }
-      turn.reply = displayValue(message.content);
     }
   }
 }
@@ -428,7 +434,7 @@ function receiveEvent(record, turn, event) {
     scheduleDraft();
     return;
   }
-  if (first || ['model_call', 'tool_call', 'tool_result', 'approval', 'approval_resolved', 'guard', 'done', 'error'].includes(event.type)) renderChat();
+  if (first || ['model_call', 'tool_call', 'tool_result', 'approval', 'approval_resolved', 'guard', 'compaction', 'done', 'error'].includes(event.type)) renderChat();
   renderInspector();
   if (first || event.type === 'approval_resolved') renderComposer();
 }
@@ -707,6 +713,20 @@ function renderTurn(record, turn) {
   const final = run?.terminal;
   const text = final?.type === 'done' ? final.text ?? turn.reply : turn.reply;
   const contents = [activity(record, turn)];
+  const compacted = actorEvents(run).findLast((event) => event.type === 'compaction');
+  if (compacted) {
+    const label = `历史已压缩 · ${compacted.before} → ${compacted.after} 条`;
+    const summary = button(label, () => {
+      record.selectedRun = run.id;
+      run.compactionRevision = '';
+      setView('inspector');
+      renderInspector();
+      ui['compaction-panel'].focus({ preventScroll: true });
+      ui['compaction-panel'].scrollIntoView({ block: 'nearest' });
+    }, 'compaction-banner');
+    summary.dataset.focus = `compaction:${run.id}`;
+    contents[0].prepend(summary);
+  }
   if (text) {
     const answer = node('div', 'message-text');
     answer.append(markdown(text));
@@ -984,14 +1004,32 @@ function compactionRow(label, count, tokens, maxTokens, className = '') {
   return row;
 }
 
+function historyProgress(events) {
+  const snapshot = events.findLast((event) => Number.isFinite(event.history_messages) && event.threshold > 0);
+  if (!snapshot) return null;
+  const { history_messages: count, threshold, recent } = snapshot;
+  const field = node('div', 'history-progress');
+  const title = node('div', 'compaction-label');
+  title.append(node('span', '', '历史窗口'), node('b', '', `${count} / ${threshold} 条`));
+  const progress = document.createElement('progress');
+  progress.max = threshold;
+  progress.value = Math.min(count, threshold);
+  progress.setAttribute('aria-label', '历史压缩阈值进度');
+  field.append(title, progress, node('p', 'token-usage', `超过 ${threshold} 条触发压缩 · 保留最近 ${recent} 条`));
+  return field;
+}
+
 function renderCompaction(events, run) {
   const panel = ui['compaction-panel'];
   const wasOpen = panel.querySelector('details')?.open;
   const records = events.filter((event) => event.type === 'compaction');
   const selected = run?.compactionRevision ?? '';
   const item = selected === '' ? records.at(-1) : records[Number(selected)];
+  const progress = historyProgress(events);
   if (!item) {
-    panel.replaceChildren(cardHeading('上下文压缩'), node('p', 'empty-panel', '当前运行尚未触发压缩。'));
+    panel.replaceChildren(cardHeading('上下文压缩'));
+    if (progress) panel.append(progress);
+    else panel.append(node('p', 'empty-panel', '发送消息后查看历史窗口。'));
     return;
   }
   const heading = cardHeading('上下文压缩', records.length === 1 ? '估算 Token' : '');
@@ -1010,7 +1048,9 @@ function renderCompaction(events, run) {
   if (Number.isFinite(item.kept)) detail.push(`保留最近 ${item.kept} 条`);
   if (Number.isFinite(item.threshold)) detail.push(`阈值 ${item.threshold} 条`);
   preserveFocus(panel, () => {
-    panel.replaceChildren(heading, chart);
+    panel.replaceChildren(heading);
+    if (progress) panel.append(progress);
+    panel.append(chart);
     if (detail.length) panel.append(node('p', 'token-usage', detail.join(' · ')));
     if (item.summary) {
       const summary = node('details', 'summary-text');

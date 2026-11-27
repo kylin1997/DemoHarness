@@ -8,13 +8,9 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .protocol import ModelReply, ToolCall
+from .protocol import ModelError, ModelReply, ToolCall
 
 OnDelta = Callable[[str], Awaitable[None]]
-
-
-class ModelError(RuntimeError):
-    """A model request failed with a message suitable for the event stream."""
 
 
 class OpenAiChatModel:

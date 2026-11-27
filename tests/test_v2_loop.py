@@ -182,3 +182,115 @@ def test_compaction_retains_the_complete_tool_exchange_and_raw_history(runtime):
     assert len(store.messages(session_id)) == 14
     assert store.messages(session_id)[0] == old[0]
     assert store.window(session_id)[1:6] == [request, *observations]
+
+
+def test_malformed_command_never_requests_approval(runtime):
+    make, _, session_id = runtime
+    events = []
+
+    class Model:
+        async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
+            if not any(message["role"] == "tool" for message in messages):
+                return ModelReply(
+                    calls=(ToolCall("search", "tool_search", {"query": "run_command"}),)
+                )
+            if messages[-1]["tool_call_id"] == "search":
+                return ModelReply(
+                    calls=(
+                        ToolCall(
+                            "invalid",
+                            "run_command",
+                            {
+                                "argv": ["printf", "hello"],
+                                "unexpected": True,
+                            },
+                        ),
+                    )
+                )
+            return ModelReply("命令参数无效。")
+
+    async def send(event):
+        events.append(event)
+
+    asyncio.run(make(Model()).chat(session_id, "请求有误的命令", {}, send))
+    assert not any(event["type"] == "approval" for event in events)
+    result = next(
+        event
+        for event in events
+        if event.get("call_id") == "invalid" and event["type"] == "tool_result"
+    )
+    assert result["is_error"] and "additionalProperties" in result["result"]
+
+
+def test_transcript_keeps_run_identity_after_disconnect(runtime):
+    make, store, session_id = runtime
+
+    class Model:
+        async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
+            return ModelReply("第二条已完成。")
+
+    async def disconnect(event):
+        raise ConnectionResetError
+
+    async def send(event):
+        pass
+
+    async def verify():
+        harness = make(Model())
+        with pytest.raises(ConnectionResetError):
+            await harness.chat(session_id, "第一条在 SSE 开头断开", {}, disconnect)
+        await harness.chat(session_id, "第二条继续处理", {}, send)
+
+    asyncio.run(verify())
+    first, second, reply = store.messages(session_id)
+    runs = [
+        event["run_id"]
+        for event in store.events(session_id)
+        if event["type"] == "run_started"
+    ]
+    assert [first["run_id"], second["run_id"], reply["run_id"]] == [
+        runs[0],
+        runs[1],
+        runs[1],
+    ]
+
+
+def test_tool_exchange_remains_available_after_model_failure(runtime, tmp_path):
+    from demoharness.protocol import ModelError
+
+    make, store, session_id = runtime
+    (tmp_path / "notes.md").write_text("remember this observation")
+    events = []
+
+    class Model:
+        async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
+            if messages[-1]["content"] == "read a file":
+                return ModelReply(
+                    calls=(ToolCall("read", "read", {"path": "notes.md"}),)
+                )
+            if messages[-1]["role"] == "tool":
+                raise ModelError("模型暂时不可用。")
+            assert any(
+                message.get("tool_call_id") == "read"
+                and "remember this observation" in message["content"]
+                for message in messages
+            )
+            return ModelReply("读到了上一轮的观察。")
+
+    async def send(event):
+        events.append(event)
+
+    async def verify():
+        harness = make(Model())
+        await harness.chat(session_id, "read a file", {}, send)
+        assert (
+            events[-1]["type"] == "error"
+            and events[-1]["message"] == "模型暂时不可用。"
+        )
+        await harness.chat(session_id, "use the prior observation", {}, send)
+        assert events[-1]["type"] == "done"
+
+    asyncio.run(verify())
+    assert any(
+        message.get("tool_call_id") == "read" for message in store.window(session_id)
+    )

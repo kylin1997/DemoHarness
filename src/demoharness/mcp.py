@@ -174,9 +174,6 @@ class StdioMcpClient:
                 async with self._lock:
                     try:
                         return await self._exchange(method, params)
-                    except asyncio.CancelledError:
-                        await self.close()
-                        raise
                     except (OSError, ValueError) as error:
                         await self.close()
                         raise McpError(

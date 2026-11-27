@@ -288,7 +288,6 @@ async def _run_command(context: ToolContext, args: dict) -> str:
                 cwd=context.workspace,
                 env={
                     "PATH": os.defpath,
-                    "HOME": str(context.workspace),
                     "LANG": "C.UTF-8",
                 },
                 stdin=asyncio.subprocess.DEVNULL,
@@ -646,7 +645,7 @@ class ToolRegistry:
     def schemas(self, names: set[str]) -> list[dict]:
         return [spec.schema() for name, spec in self.specs.items() if name in names]
 
-    async def invoke(self, name: str, context: ToolContext, args: dict) -> str:
+    def validate(self, name: str, args: dict) -> ToolSpec:
         spec = self.specs.get(name)
         if spec is None:
             raise ToolError(f"Unknown tool: {name}")
@@ -659,13 +658,20 @@ class ToolRegistry:
                 raise ToolError(
                     f"Invalid {name} arguments at {error.json_path} ({error.validator})"
                 )
-            return _bounded_text(await spec.handler(context, args))
-        except McpError as error:
-            raise ToolError(_bounded_text(str(error))) from error
         except Unresolvable as error:
             raise ToolError(
                 f"Unresolved parameter schema reference for {name}"
             ) from error
+        return spec
+
+    async def invoke(self, name: str, context: ToolContext, args: dict) -> str:
+        return await self.execute(self.validate(name, args), context, args)
+
+    async def execute(self, spec: ToolSpec, context: ToolContext, args: dict) -> str:
+        try:
+            return _bounded_text(await spec.handler(context, args))
+        except McpError as error:
+            raise ToolError(_bounded_text(str(error))) from error
         except UnicodeError as error:
             raise ToolError("Expected UTF-8 text") from error
         except OSError as error:

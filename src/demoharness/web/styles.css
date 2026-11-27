@@ -127,6 +127,8 @@ h1, h2, h3, h4, p { margin: 0; }
 .waiting { color: var(--muted); font-size: 12px; }
 .message-activity { display: grid; gap: 7px; }
 .message-activity:not(:empty) { margin: 2px 0 10px; }
+.compaction-banner { text-align: left; padding: 8px 11px; border: 1px solid #c5dfce; border-radius: 8px; background: #ecf6ed; color: var(--accent-dark); font-size: 12px; }
+.compaction-banner:hover { background: #deefe3; }
 .tool-output, .approval-item { border: 1px solid var(--line); background: #f7faf7; border-radius: 9px; min-width: 0; }
 .tool-output[open] { background: white; }
 .tool-output summary, .child-trace summary, .summary-text summary { cursor: pointer; list-style: none; }
@@ -245,6 +247,9 @@ h1, h2, h3, h4, p { margin: 0; }
 .compaction-track { height: 6px; background: #edf2ed; border-radius: 6px; overflow: hidden; }
 .compaction-track i { display: block; height: 100%; background: #b5cfba; border-radius: inherit; }
 .compaction-row.after .compaction-track i { background: var(--accent); }
+.history-progress { margin: 4px 0 13px; }
+.history-progress progress { display: block; width: 100%; height: 8px; margin-top: 6px; accent-color: var(--accent); }
+.history-progress .token-usage { margin-top: 5px; padding: 0; border: 0; }
 .summary-text { margin-top: 8px; font-size: 11px; }
 .summary-text summary { color: var(--accent-dark); }
 .summary-text p { margin-top: 6px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }

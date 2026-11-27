@@ -238,3 +238,41 @@ def test_unresponsive_mcp_server_times_out():
         await client.close()
 
     asyncio.run(run())
+
+
+def test_cancelling_one_mcp_call_keeps_the_shared_server(tmp_path):
+    script = tmp_path / "server.py"
+    marker = tmp_path / "request-arrived"
+    script.write_text(
+        _SERVER.replace(
+            "import sys", "import sys\nimport time\nfrom pathlib import Path"
+        ).replace(
+            '    elif method == "tools/call" and initialized:\n',
+            '    elif method == "tools/call" and initialized:\n'
+            '        if params["arguments"]["text"] == "slow":\n'
+            "            Path(sys.argv[1]).touch()\n"
+            "            time.sleep(0.15)\n",
+        )
+    )
+
+    async def verify():
+        client = StdioMcpClient(
+            "fixture", sys.executable, [str(script), str(marker)], timeout=2
+        )
+        await client.start()
+        try:
+            pending = asyncio.create_task(client.call_tool("echo", {"text": "slow"}))
+            async with asyncio.timeout(1):
+                while not marker.exists():
+                    await asyncio.sleep(0.005)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert (
+                await client.call_tool("echo", {"text": "next request"})
+                == "next request"
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(verify())

@@ -10,7 +10,15 @@ from uuid import uuid4
 
 from .agent_loop import LoopLimit, agent_loop
 from .guardrails import Guardrails
-from .protocol import FIXED_TOOLS, ChatModel, Emit, ModelReply, ToolCall, ToolContext
+from .protocol import (
+    FIXED_TOOLS,
+    ChatModel,
+    Emit,
+    ModelError,
+    ModelReply,
+    ToolCall,
+    ToolContext,
+)
 from .skills import Skills
 from .state import Store
 from .toolbox import ToolError, ToolRegistry
@@ -110,12 +118,12 @@ class DemoHarness:
         turn = _Turn(
             self, session_id, uuid4().hex, self.models[profile], reasoning, emit
         )
+        user = {"role": "user", "content": message}
+        self.store.add_message(session_id, user | {"run_id": turn.run_id})
         await turn.emit("run_started", mode=mode, profile=profile, reasoning=reasoning)
 
         try:
             await turn.emit("stage", stage="input")
-            user = {"role": "user", "content": message}
-            self.store.add_message(session_id, user)
             input_problem = self.guardrails.check_input(message)
             await turn.guard("input", input_problem)
             if input_problem:
@@ -143,7 +151,7 @@ class DemoHarness:
             if not problem and turn.stream:
                 await turn.stream.flush(text)
             await turn.finish(text, blocked=bool(problem), in_window=True)
-        except (LoopLimit, TurnError) as error:
+        except (LoopLimit, ModelError, TurnError) as error:
             await turn.fail(str(error))
         except ConnectionResetError:
             raise
@@ -211,12 +219,26 @@ class _Turn:
         self, text: str, *, blocked: bool, in_window: bool = False
     ) -> None:
         message = {"role": "assistant", "content": text}
-        self.harness.store.add_message(self.session_id, message)
+        self.harness.store.add_message(
+            self.session_id, message | {"run_id": self.run_id}
+        )
         if in_window:
             self.window.append(message)
             self.harness.store.save_window(self.session_id, self.window)
         await self.emit("stage", stage="finish")
-        await self.emit("done", text=text, blocked=blocked)
+        history_messages = (
+            len(self.window)
+            if in_window
+            else len(self.harness.store.window(self.session_id))
+        )
+        await self.emit(
+            "done",
+            text=text,
+            blocked=blocked,
+            history_messages=history_messages,
+            threshold=CONTEXT_THRESHOLD,
+            recent=RECENT_MESSAGES,
+        )
 
     async def fail(self, message: str) -> None:
         await self.emit("stage", stage="finish")
@@ -237,6 +259,8 @@ class _Turn:
         async def think(round_number: int, exposed: set[str]) -> ModelReply:
             self.round = round_number
             if round_number > 1:
+                if self.is_parent:
+                    self.harness.store.save_window(self.session_id, self.window)
                 await self.compact()
             messages = await self.prompt(
                 report=round_number > 1 or bool(self.plan) or not self.is_parent
@@ -298,18 +322,24 @@ class _Turn:
             args={} if unsafe_args else args,
             call_id=public_id,
         )
+        spec = None
         if name not in exposed or (not self.is_parent and name not in CHILD_TOOLS):
             problem = "当前轮次没有公开该工具。"
         else:
             problem = unsafe_args or guards.check_tool(name, args)
+        if not problem:
+            try:
+                spec = self.harness.registry.validate(name, args)
+            except ToolError as error:
+                problem = str(error)
         await self.guard("tool", problem)
         if not problem:
             problem = await guards.invoke_with_approval(
                 self.session_id, name, args, self.emit
             )
-        if not problem:
+        if spec is not None and not problem:
             try:
-                result = await self.harness.registry.invoke(name, context, args)
+                result = await self.harness.registry.execute(spec, context, args)
             except ToolError as error:
                 problem = str(error)
             except ConnectionResetError:
@@ -490,14 +520,28 @@ class _Turn:
                 add("conversation", "对话消息", message)
 
         if report:
+            tool_names = (
+                self.revealed if self.is_parent else self.revealed & CHILD_TOOLS
+            )
+            schemas = self.harness.registry.schemas(tool_names)
+            if schemas:
+                parts["tool_schemas"] = {
+                    "key": "tool_schemas",
+                    "label": "工具定义",
+                    "count": len(schemas),
+                    "tokens": _estimated_tokens(schemas),
+                }
             await self.emit(
                 "context",
                 messages=len(messages),
+                history_messages=len(self.window),
+                threshold=CONTEXT_THRESHOLD,
+                recent=RECENT_MESSAGES,
                 estimated_tokens=sum(p["tokens"] for p in parts.values()),
                 parts=list(parts.values()),
             )
         return messages
 
 
-def _estimated_tokens(message: dict) -> int:
-    return (len(json.dumps(message, ensure_ascii=False).encode()) + 3) // 4
+def _estimated_tokens(data: dict | list[dict]) -> int:
+    return (len(json.dumps(data, ensure_ascii=False).encode()) + 3) // 4
