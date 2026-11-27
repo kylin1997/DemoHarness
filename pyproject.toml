@@ -1,11 +1,13 @@
 [project]
 name = "demoharness"
-version = "0.1.0"
-description = "A minimal teaching demo for long-running agent tasks."
+version = "0.2.0"
+description = "An observable, minimal teaching harness for tool-using agents."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.11,<4",
     "httpx>=0.28.1",
+    "jsonschema>=4.23,<5",
 ]
 
 [dependency-groups]

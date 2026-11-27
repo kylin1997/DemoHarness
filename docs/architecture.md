@@ -1,64 +1,44 @@
 # DemoHarness 架构总览
 
-DemoHarness 用一个 Python 进程托管多个 Agent。CLI 和 Python API 调用同一个运行时。SQLite 保存 Task、Session 记录和 Agent 记忆，工作副本保存实际产物。Agent 可以同时推进多件事，同一个 Task 同时最多由一个 Worker 推进。
+学习者从浏览器发起一条消息，跟着同一轮的输出观察模型、环境和 Harness 的职责。最小 `agent_loop()` 让模型在可用工具范围内选择动作，把工具结果变成下一次调用的输入。没有工具请求时，模型返回的文本可以作为本轮结果。轮数上限为循环收敛提供保险丝。这个结构参考了 Anthropic 对简单组合、环境真实反馈、人工检查点和停止条件的说明。 [Anthropic · Building effective agents](https://www.anthropic.com/research/building-effective-agents) · [最小循环](../src/demoharness/agent_loop.py)
 
-在继续阅读前，可以先运行 `uv run python examples/verified_task.py`。这个例子创建 `report.md`，然后逐字核对文件内容。后面的流程都可以用它对照。 [文件示例](../examples/verified_task.py)
+## 装配和边界
 
-## 先认清几个抽象
-
-| 概念 | 职责和归属 |
-| --- | --- |
-| Agent 定义 | `AgentDefinition` 保存稳定 ID、所属项目、身份提示、模型入口和工具权限。CLI 可以读取 Agent 目录下的 `SOUL.md` 和 `AGENTS.md` 作为提示。 |
-| Agent 实例 | `runtime.agent(id)` 返回的操作入口，能接收消息、查 Task、停止和恢复工作。同一宿主内的 Task、工作目录、协调记录和长期记忆按 Agent ID 隔离。 |
-| Agent 运行时 | `AgentRuntime` 打开状态目录，管理 SQLite、协调器、观察器和 Worker 的生命周期。关闭后停止推进，重开时恢复可继续的工作。 |
-| Worker | 运行时为一个 Task 调度的进程内异步任务。它认领 Task、开启 Run，准备或复用工作副本，再推进执行循环。 |
-| Task | 一件可独立推进的工作，拥有目标、文件验收条件、写入范围、预算、工作副本及 Plan。 |
-| Session | 完成一件事留下的历史，包括用户输入、模型轮次、工具记录、Plan 修订和交付。每个 Task 对应一个 Session，共用 ID。 |
-| Plan | Task 当前准备做的有序步骤。每步有稳定 ID、状态和证据引用。模型可以修订计划，每次修订有版本和原因。 |
-| Run | Task 的一次执行尝试，记录起止时间、配置版本和结束原因。停止后继续同一个 Task 时会开始新的 Run。 |
-| Context | 一次模型请求的输入，来自当前目标、验收、Plan、Session 片段和相关记忆。每轮重新组装。 |
-| 子 Agent | 主 Task 临时委派的只读调查者。有独立上下文，按需读取父 Session，完成后交回结论与证据。 |
-| 长期记忆 | Agent 跨 Task 使用的偏好、项目事实、约束和经验，附带来源。项目知识可以按项目限定召回。 |
-
-## 一次工作怎样流动
+`Application` 做三件事。读取本机配置并打开 SQLite，装配模型、工具、护栏和技能，最后提供浏览器界面及 HTTP/SSE 端点。HTTP 入口按会话限制同时运行的对话，审批另走 POST，因此等待审批时流仍然可以接收事件。 [Application](../src/demoharness/application.py)
 
 ```mermaid
-flowchart TD
-    Direct["Python submit：已知目标与验收"] --> Queued["Task 入队，新 Task 建立同 ID 的 Session"]
-    Input["聊天消息或 Git 提交"] --> Router["协调器"]
-    Router -->|创建| Queued
-    Router -->|关联| Existing["补充写入已有 Session"]
-    Router -->|回复或澄清| Notice["通知"]
-    Existing -->|需要继续执行且满足条件| Queued
-    Existing -->|正在执行时在动作边界读取| Model
-    Queued --> Worker["Worker 认领，开启 Run"]
-    Worker --> Workspace["准备或复用工作副本"]
-    Workspace --> Model["从 Session 组装 Context，调用模型"]
-    Model -->|提出工具操作| Tool["宿主授权、记录并执行"]
-    Tool -->|结果写入 Session| Model
-    Model -->|提出完成| Verify["在实际文件上验收"]
-    Verify -->|可纠正且有预算| Model
-    Verify -->|通过| Delivery["保存验收证据和差异"]
+flowchart LR
+    Page["浏览器三栏"] -->|"POST /api/chat"| HTTP["Application"]
+    HTTP --> Harness["DemoHarness.chat()"]
+    Harness --> Guard["输入、工具、输出护栏"]
+    Harness --> Window["历史窗口、Skills 与记忆"]
+    Harness --> Loop["agent_loop()"]
+    Loop -->|"messages + 已加载工具 Schema"| Model["ChatModel"]
+    Model -->|"工具请求或文本增量"| Loop
+    Loop -->|"调用策略"| Tools["ToolRegistry"]
+    Tools -->|"真实结果或错误观察"| Loop
+    Harness --> Store["SQLite Session"]
+    Harness -->|"SSE 事件"| Page
+    Page -->|"POST /api/approve"| Guard
 ```
 
-协调器决定消息归属，Worker 推进 Task，模型提出操作，宿主负责授权、执行和验收。这几段使用不同的输入和权限。子 Agent 与主 Worker 共用 `run_loop()`，由各自的角色配置决定可用上下文、工具和完成条件。协调、Worker 与临时委派的分工参考了 DeepSeek Super Agent 的领域模型。 [DeepSeek 领域模型](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/docs/001-domain.md)
+| 模块 | 负责什么 |
+| --- | --- |
+| [DemoHarness](../src/demoharness/harness.py) | 串起输入、上下文、执行循环、输出、收尾五个阶段。父 Agent 与 SubAgent 都能复用最小循环。 |
+| [工具与协议](../src/demoharness/toolbox.py) | 每个工具用自己的 Schema 和处理策略。搜索发现工具后，下一轮才获得相应 Schema。 |
+| [Guardrails](../src/demoharness/guardrails.py) | 拦截输入、验证工具请求、等待用户审批，并检查对外文本。审批的归属按 Session 和审批 ID 核对。 |
+| [Store](../src/demoharness/state.py) | 保存原始对话、模型历史窗口、可观察事件、记忆、配置和命令信任。 |
+| [Skills](../src/demoharness/skills.py) | 启动时读取技能目录，向模型展示简短索引，并在命中输入时加载对应全文。 |
+| [模型适配](../src/demoharness/models.py) | 离线模型和 OpenAI 兼容模型遵守同一个流式调用接口。 |
+| [MCP](../src/demoharness/mcp.py) | 连接本机配置的 stdio 服务，发现并调用远端工具。 |
 
-## 从现象追到源码
+工具按需注入以 Anthropic Tool Search 的设计为参考。固定的 `tool_search`、`read`、`todo` 初始可用，其他工具的 Schema 随发现结果加入。发现结果只在当前用户轮次生效。父 Agent 的记忆按会话持久化，子 Agent 从独立上下文开始，回传可公开的结果及工具证据。 [Anthropic · Tool search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool) · [工具与模式](guide.md#chapter-05)
 
-| 想理解的问题 | 起点 | 接着读 |
-| --- | --- | --- |
-| 命令如何变成调用 | [CLI](../src/demoharness/cli.py) · [运行时和 Agent API](../src/demoharness/runtime.py) | [任务执行](task-execution.md) |
-| 模型、工具和验收怎样循环 | [执行循环](../src/demoharness/core/loop.py) · [文件工具](../src/demoharness/tools/files.py) | [任务执行](task-execution.md) |
-| 状态记在哪里，重启怎样继续 | [TaskStore](../src/demoharness/core/storage.py) · [Session 投影](../src/demoharness/core/session.py) | [Session 与恢复](session-and-recovery.md) |
-| 怎样处理多件事、委派并积累经验 | [消息路由](../src/demoharness/coordination.py) · [委派](../src/demoharness/tools/delegation.py) · [记忆](../src/demoharness/memory.py) · [Git 观察](../src/demoharness/discovery.py) | [Super Agent](super-agent.md) |
+## 生产化边界
 
-## 生产化还要考虑什么
-
-当前实现适用于单机教学。投入生产前，还需要根据数据敏感度、运行规模和工具风险完善这些方向。
-
-1. **权限与隔离**。明确用户和服务身份。为高风险工具设置审批、执行沙箱和网络访问策略。
-2. **可靠执行**。定义重试与幂等边界，验证数据库备份、迁移和故障恢复。
-3. **并发与容量**。按用户或租户隔离任务，设计队列调度、限流及资源配额。
-4. **数据与隐私**。集中管理凭据，规定 Session 和记忆的访问、保留与删除策略。
-5. **可观测性与运营**。关联 Task、Run 和工具日志，建立指标、追踪、告警和审计。
-6. **模型质量与成本**。用实际任务持续评测，设置调用预算、超时和降级策略。
+1. 为用户、会话、工具执行容器设置身份和资源隔离。
+2. 为命令、网页获取和 MCP 建立系统级沙箱及网络访问策略。
+3. 为历史、记忆与审批制定访问、保留、删除和备份规则。
+4. 为调用、批准、错误和 Token 成本加入关联日志、追踪和告警。
+5. 评测真实模型的工具选择、重试、输出守卫和上下文压缩质量。
+6. 为升级、并发、取消和恢复制定可测试的服务级目标。

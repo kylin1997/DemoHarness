@@ -1,25 +1,24 @@
 # DemoHarness
 
-DemoHarness 是一个 Python 教学项目，用来理解 Agent 调用模型和工具时，应用程序需要负责什么。你可以从一次消息开始，看到系统如何确定任务、保存上下文、限制工具权限、检查真实产物，以及在中断后继续。
+DemoHarness 是一个可观察的 Agent 工程教学项目。先在浏览器里和 Agent 对话，右栏会告诉你模型收到了什么、工具何时执行、结果如何推动下一轮。再沿代码地图找到触发这些行为的代码。
 
-项目在本机的单进程里运行，使用 SQLite 保存状态。它演示的是基础机制。计划用于实际业务时，先看[生产化还要考虑什么](docs/architecture.md#生产化还要考虑什么)。
+## 启动
 
-## 开始运行
-
-准备 Python 3.11+、Git 和 uv。文件工具使用 POSIX 接口，建议在 Linux 或 macOS 上运行。 [安装 uv](https://docs.astral.sh/uv/getting-started/installation/)
+准备 Python 3.11+ 和 uv。在仓库根目录运行下面两条命令。
 
 ```sh
 uv sync --locked
-uv run python examples/verified_task.py
+uv run demoharness serve
 ```
 
-示例会在临时 Git 工作副本里写入 `report.md`。你会看到文件正文、`passed` 验收结果、SHA-256 和 Git 差异。Task 与 Session 的 ID 相同，源仓库保持原样。示例使用可控模型，无需 API 密钥。
+打开 [本机 DemoHarness](http://127.0.0.1:8765)。默认是离线演示模型。在聊天框输入「请用命令打印 hello」，审批卡弹出后选择「仅本次允许」，观察右栏的调用、批准、执行和回传。更多练习覆盖 ReAct、计划、SubAgent、工具发现和压缩。 [快速体验](docs/guide.md#chapter-02)
 
-## 接下来读什么
+## 阅读路径
 
-1. 先弄清 Agent、Task、Session、Plan 和 Run 各自负责什么，以及 CLI 和 Python API 怎样进入同一个运行时。 [架构总览](docs/architecture.md)
-2. 跟着 `report.md` 例子走一遍，从创建任务到模型提议写文件，再到宿主验收并记录交付。 [任务如何执行和交付](docs/task-execution.md)
-3. 看停止、重启和崩溃时，系统怎样从 Session 账本判断下一步。 [Session、上下文和恢复](docs/session-and-recovery.md)
-4. 看同一个 Agent 怎样处理多个请求、委派临时子 Agent，从历史提炼记忆，并从 Git 提交发现新工作。 [Super Agent 如何组织工作](docs/super-agent.md)
+1. 跑一遍快速体验，熟悉时序图、上下文构成和压缩面板。 [教学指南](docs/guide.md)
+2. 双击下面的 HTML 打开代码地图。十站导览会在每一站打开对应的图、讲解卡和源码入口。 [交互式代码地图](docs/code-map/demoharness-arch/demoharness-arch.html)
+3. 从架构总览跳到 `agent_loop()`，读模型回复、工具请求和观察怎样构成最小循环。 [架构总览](docs/architecture.md)
 
-[全部可运行示例和真实模型的 CLI 用法](examples/README.md)
+会话和长期记忆保存在 `~/.demoharness-v2/harness.sqlite3`，默认工作目录为同级的 `workspace/`。用 `--state-dir`、`--workspace`、`--skills` 和 `--config` 指定其他位置。模型档案可以通过配置文件接入。 [配置 OpenAI 兼容模型和 MCP](docs/guide.md#chapter-10)
+
+项目用于本机教学。投入生产前需要完善用户与进程隔离、执行沙箱、可靠性、隐私、审计和模型评测。 [生产化边界](docs/architecture.md#生产化边界)
