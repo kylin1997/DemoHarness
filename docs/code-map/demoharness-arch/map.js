@@ -5,6 +5,8 @@ const diagramWidth = 678;
 const diagramHeight = 470;
 const codeFile = (file) => sourceRoot + file;
 const pad = (number) => String(number).padStart(2, "0");
+const chapterLink = (chapter, label = `第 ${pad(chapter)} 章 · ${chapters[chapter]} ↗`) =>
+  `<a href="../../guide.md#chapter-${pad(chapter)}">${label}</a>`;
 const treeScroll = byId("tree-scroll");
 const mapScroll = byId("map-scroll");
 const cardsScroll = byId("cards-scroll");
@@ -48,7 +50,7 @@ function renderTree() {
   byId("tree").innerHTML = `<ul class="tree-list tree-root">${treeFolder("src", treeFolder("demoharness", entry + files + web))}</ul>`;
 }
 
-function graphEdge(from, to, label) {
+function graphEdge(from, to, label, viaX) {
   const [x, y] = modules[from].graph;
   const [targetX, targetY] = modules[to].graph;
   const direction = Math.sign(targetX - x);
@@ -60,17 +62,20 @@ function graphEdge(from, to, label) {
   const tip = vertical
     ? `M ${endX - 4} ${endY - 5} L ${endX} ${endY} L ${endX + 4} ${endY - 5}`
     : `M ${endX - direction * 5} ${endY - 4} L ${endX} ${endY} L ${endX - direction * 5} ${endY + 4}`;
-  const labelX = (startX + endX) / 2 + (vertical ? 35 : 0);
-  const labelY = (startY + endY) / 2 + (vertical ? 4 : -7);
+  const labelX = viaX ? viaX : (startX + endX) / 2 + (vertical ? 35 : 0);
+  const labelY = viaX ? endY - 22 : (startY + endY) / 2 + (vertical ? 4 : -7);
+  const line = viaX
+    ? `M ${startX} ${startY} H ${viaX} V ${endY - 10} H ${endX} V ${endY}`
+    : `M ${startX} ${startY} L ${endX} ${endY}`;
   return `<g data-from="${from}" data-to="${to}">
-    <path class="edge" d="M ${startX} ${startY} L ${endX} ${endY}"/>
+    <path class="edge" d="${line}"/>
     <path class="edge tip" d="${tip}"/>
     <text class="edge-label" x="${labelX}" y="${labelY}">${label}</text>
   </g>`;
 }
 
 function renderGraph() {
-  const edges = graphEdges.map(([from, to, label]) => graphEdge(from, to, label)).join("");
+  const edges = graphEdges.map((edge) => graphEdge(...edge)).join("");
   const nodes = Object.entries(modules).map(([id, module]) => {
     const [x, y] = module.graph;
     return `<button type="button" class="graph-node" data-node="${id}" data-type="${module.type}"
@@ -150,9 +155,12 @@ function renderLegend() {
 
 function updateSequenceStatus() {
   const status = byId("sequence-status");
-  const { messages } = stations[stationIndex];
-  if (status && messages) {
-    status.textContent = `消息 ${pad(sequenceStep + 1)} / ${pad(messages.length)}`;
+  const station = stations[stationIndex];
+  const message = station.messages?.[sequenceStep];
+  if (status && message) {
+    const reading = message[6] ?? [station.chapters[0]];
+    status.innerHTML = `消息 ${pad(sequenceStep + 1)} / ${pad(station.messages.length)} ` +
+      reading.map((chapter) => chapterLink(chapter, `第 ${pad(chapter)} 章`)).join(" ");
   }
 }
 
@@ -183,9 +191,7 @@ function renderTour() {
     sourceLinks.append(link);
   }
   reading.append(sourceLinks);
-  byId("tour-links").innerHTML = free ? "" : station.chapters.map((chapter) =>
-    `<a href="../../guide.md#chapter-${pad(chapter)}">第 ${pad(chapter)} 章 · ${chapters[chapter]} ↗</a>`
-  ).join("");
+  byId("tour-links").innerHTML = free ? "" : station.chapters.map((chapter) => chapterLink(chapter)).join("");
   const commands = byId("tour-commands");
   commands.hidden = free || !station.commands;
   commands.innerHTML = commands.hidden ? "" : station.commands.map((command) => `<code>${command}</code>`).join("") +
@@ -226,10 +232,21 @@ function setView(next, { reset = false } = {}) {
   sequence.hidden = next !== "sequence";
   byId("map-tab").setAttribute("aria-pressed", String(next === "graph"));
   byId("sequence-tab").setAttribute("aria-pressed", String(next === "sequence"));
+  byId("sequence-expand").hidden = next !== "sequence";
+  if (next !== "sequence") setExpanded(false);
   if (reset) {
     mapScroll.scrollTo(0, 0);
   }
   renderLegend();
+  schedulePointer();
+}
+
+function setExpanded(expanded) {
+  byId("workspace").classList.toggle("is-expanded", expanded);
+  const button = byId("sequence-expand");
+  button.textContent = expanded ? "恢复三栏" : "放大";
+  button.setAttribute("aria-pressed", String(expanded));
+  button.setAttribute("aria-label", expanded ? "恢复三栏" : "放大时序图");
   schedulePointer();
 }
 
@@ -465,6 +482,15 @@ byId("map-tab").addEventListener("click", () => {
 });
 byId("sequence-tab").addEventListener("click", () => {
   setView("sequence", { reset: true });
+  selectStep(sequenceStep);
+});
+byId("sequence-expand").addEventListener("click", () => {
+  const expanded = byId("sequence-expand").getAttribute("aria-pressed") === "true";
+  setExpanded(!expanded);
+  if (!expanded) {
+    playing = false;
+    updateControls();
+  }
   selectStep(sequenceStep);
 });
 
