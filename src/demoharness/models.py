@@ -224,26 +224,29 @@ class ScriptedChatModel:
         )
         model_input = json.dumps([messages, schemas], ensure_ascii=False)
         return ModelReply(
-            text, calls, (len(model_input) + 3) // 4, (len(output) + 3) // 4
+            text,
+            calls,
+            (len(model_input.encode()) + 3) // 4,
+            (len(output.encode()) + 3) // 4,
         )
 
 
 @dataclass
 class _ScriptedTurn:
     request: str
-    system: str
+    system_headers: list[str]
     available: set[str]
     observations: dict[str, list[str]]
     message_count: int
 
     @classmethod
     def from_messages(cls, messages: list[dict], schemas: list[dict]) -> _ScriptedTurn:
-        system = "\n".join(
-            message["content"]
+        system_headers = [
+            message["content"].partition("\n")[0]
             for message in messages
             if message.get("role") == "system"
             and isinstance(message.get("content"), str)
-        )
+        ]
         available = {schema["function"]["name"] for schema in schemas}
         last_user = next(
             (
@@ -264,18 +267,19 @@ class _ScriptedTurn:
                 observations.setdefault(name, []).append(
                     str(message.get("content", ""))
                 )
-        return cls(request, system, available, observations, len(messages))
+        return cls(request, system_headers, available, observations, len(messages))
 
     def reply(self) -> tuple[str, tuple[ToolCall, ...]]:
         request = self.request.casefold()
-        if "DEMOHARNESS_COMPACT" in self.system:
+        phase = self.system_headers[0] if self.system_headers else ""
+        if phase == "DEMOHARNESS_COMPACT":
             return self.compact(), ()
-        if "DEMOHARNESS_PLAN" in self.system:
+        if phase == "DEMOHARNESS_PLAN":
             steps = (
                 _NOTES_PLAN if "notes.md" in request else ("明确请求", "完成并核对结果")
             )
             return json.dumps({"steps": steps}, ensure_ascii=False), ()
-        if "DEMOHARNESS_CHILD" in self.system:
+        if phase == "DEMOHARNESS_CHILD":
             return self.inspect_notes()
         if request == "请用 mcp 回显 hello":
             return self.use_deferred("mcp__demo__echo", {"text": "hello"}, "MCP 回显")
@@ -300,7 +304,9 @@ class _ScriptedTurn:
                 "run_command", {"argv": ["printf", "hello"]}, "命令输出"
             )
         if "notes.md" in request:
-            return self.inspect_notes(planned="DEMOHARNESS_ACTIVE_PLAN" in self.system)
+            return self.inspect_notes(
+                planned="DEMOHARNESS_ACTIVE_PLAN" in self.system_headers
+            )
         if "工具" in request or "tool" in request:
             return (
                 "每轮先提供工具搜索、文件读取和计划更新。模型可通过工具搜索获取其余工具的参数与用法。",

@@ -298,6 +298,17 @@ def test_scripted_plan_and_compaction_use_separate_markers():
         assert summary.calls == ()
         assert user["content"] in summary.text
 
+        ordinary = await model.chat_stream(
+            [
+                {"role": "system", "content": "Main agent instructions"},
+                {"role": "system", "content": "DEMOHARNESS_PLAN"},
+                {"role": "user", "content": "你好"},
+            ],
+            _schemas("tool_search", "read", "todo"),
+            _discard,
+        )
+        assert "已收到你的消息" in ordinary.text
+
     asyncio.run(run())
 
 
