@@ -4,7 +4,7 @@ DemoHarness 面向初学者。概念、边界和运行机制以架构总览及�
 
 ## 用 Poteto Mode 开发新需求
 
-使用 pstack 的 `poteto-mode` 选择并执行开发流程。在 Codex 里加载 `$pstack:poteto-mode`。如果当前工作区使用本地技能，读取 `.agents/skills/poteto-mode/SKILL.md`，并按同目录的 `references/codex-tools.md` 使用对应工具。在 Claude Code 中可调用 `/poteto-mode`。新检出环境可按所用客户端的说明安装 pstack。 [pstack 安装与调用](https://github.com/michael-denyer/pstack-claude#install)
+使用 pstack 的 `poteto-mode` 选择并执行开发流程。在 Codex 里加载 `$pstack:poteto-mode`。如果当前工作区使用本地技能，读取 `.agents/skills/poteto-mode/SKILL.md`，并按 `.agents/skills/poteto-mode/references/codex-tools.md` 使用对应工具。在 Claude Code 中可调用 `/poteto-mode`。新检出环境可按所用客户端的说明安装 pstack。 [pstack 安装与调用](https://github.com/michael-denyer/pstack-claude#install)
 
 1. **确认目标和验收。** 先读用户需求、README 和对应实现，确认入口、可观察结果和失败行为。按任务类型阅读 Poteto Mode 的 Feature、Bug Fix 或 Refactoring playbook。
 2. **先定接口和数据形状。** 按 Architect 明确状态属于谁、模块如何交互、哪些事件由谁发出。能用小原型验证的分歧先运行验证。可独立交付的改动可用隔离工作树分工，由主开发者集成接口。

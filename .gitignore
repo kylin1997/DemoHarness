@@ -13,9 +13,6 @@ __pycache__/
 .pytest-cache/
 .ruff_cache/
 
-/references/*
-!/references/.gitkeep
-
 **/.codegraph
 .omc/
 
