@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+
+import pytest
 
 from demoharness.guardrails import (
     INPUT_LIMIT,
@@ -14,7 +17,7 @@ from demoharness.state import Store
 
 
 def test_store_survives_reopen(tmp_path):
-    path = tmp_path / "data" / "state.sqlite3"
+    path = tmp_path / "data" / "sessions"
     store = Store(path)
     first = store.create_session()
     second = store.create_session()
@@ -30,7 +33,25 @@ def test_store_survives_reopen(tmp_path):
     store.append_event(session_id, event)
     store.remember(session_id, "Evidence is in notes.md")
     store.trust(session_id, '["printf","hello"]')
+    expected_session = store.session(session_id)
     store.close()
+
+    session_path = path / session_id
+    snapshot = json.loads((session_path / "state.json").read_text(encoding="utf-8"))
+    assert snapshot == expected_session | {
+        "context_window": [message],
+        "trusted_commands": ['["printf","hello"]'],
+    }
+    history = (session_path / "history.jsonl").read_text(encoding="utf-8")
+    assert history.endswith("\n")
+    rows = [json.loads(line) for line in history.splitlines()]
+    assert all(set(row) == {"kind", "at", "value"} for row in rows)
+    assert [(row["kind"], row["value"]) for row in rows] == [
+        ("message", message),
+        ("message", {"role": "assistant", "content": "已完成"}),
+        ("event", event),
+        ("memory", "Evidence is in notes.md"),
+    ]
 
     store = Store(path)
     try:
@@ -55,8 +76,153 @@ def test_store_survives_reopen(tmp_path):
         store.close()
 
 
+def test_history_append_updates_recency_without_replacing_snapshot(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    now = 1.0
+    monkeypatch.setattr("demoharness.state.time.time", lambda: now)
+    first = store.create_session()["id"]
+    now = 2.0
+    second = store.create_session()
+    snapshot = path / first / "state.json"
+    initial = snapshot.read_bytes()
+    now = 3.0
+    store.append_event(first, {"type": "done"})
+    assert snapshot.read_bytes() == initial
+    updated = store.session(first)
+    assert updated["updated_at"] == now
+    assert store.list_sessions() == [updated, second]
+    store.close()
+
+    reopened = Store(path)
+    try:
+        assert reopened.list_sessions() == [updated, second]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        b'{"kind":"event","value":',
+        b'{"kind":"event","at":42,"value":{"type":"partial"}}',
+    ],
+)
+def test_store_recovers_interrupted_history_tail(tmp_path, partial):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    session_id = store.create_session()["id"]
+    event = {"type": "start"}
+    store.append_event(session_id, event)
+    store.close()
+
+    history = path / session_id / "history.jsonl"
+    complete = history.read_bytes()
+    history.write_bytes(complete + partial)
+
+    store = Store(path)
+    try:
+        assert history.read_bytes() == complete
+        assert store.events(session_id) == [event]
+        store.append_event(session_id, {"type": "done"})
+        assert history.read_bytes().startswith(complete)
+        assert store.events(session_id) == [event, {"type": "done"}]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "bad_row", [b"{bad}\n", b'{"kind":"event","at":1,"value":[]}\n']
+)
+def test_store_rejects_malformed_complete_rows_and_releases_lock(tmp_path, bad_row):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    session_id = store.create_session()["id"]
+    store.close()
+
+    history = path / session_id / "history.jsonl"
+    history.write_bytes(bad_row)
+    with pytest.raises(ValueError, match="Invalid history record"):
+        Store(path)
+    assert history.read_bytes() == bad_row
+
+    history.write_bytes(b"")
+    reopened = Store(path)
+    try:
+        assert reopened.events(session_id) == []
+    finally:
+        reopened.close()
+
+
+def test_store_holds_writer_lock_until_close(tmp_path):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    try:
+        with pytest.raises(RuntimeError, match="Session store is already open"):
+            Store(path)
+        session = store.create_session()
+    finally:
+        store.close()
+
+    reopened = Store(path)
+    try:
+        assert reopened.list_sessions() == [session]
+        with pytest.raises(RuntimeError, match="Session store is closed"):
+            store.create_session()
+    finally:
+        reopened.close()
+
+
+def test_store_discards_malformed_trust_list(tmp_path):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    session_id = store.create_session()["id"]
+    signature = '["printf","hello"]'
+    store.trust(session_id, signature)
+    store.close()
+
+    snapshot = path / session_id / "state.json"
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+    data["trusted_commands"].append(None)
+    snapshot.write_text(json.dumps(data), encoding="utf-8")
+
+    store = Store(path)
+    try:
+        assert not store.is_trusted(session_id, signature)
+        store.trust(session_id, signature)
+        assert store.is_trusted(session_id, signature)
+    finally:
+        store.close()
+
+
+def test_failed_snapshot_replace_leaves_previous_session_state(tmp_path, monkeypatch):
+    path = tmp_path / "sessions"
+    store = Store(path)
+    try:
+        session = store.create_session()
+        session_path = path / session["id"]
+        initial = (session_path / "state.json").read_bytes()
+
+        def fail_replace(self, target):
+            raise OSError("Snapshot replace failed")
+
+        monkeypatch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(OSError, match="Snapshot replace failed"):
+            store.rename(session["id"], "Uncommitted title")
+        assert store.session(session["id"]) == session
+        assert (session_path / "state.json").read_bytes() == initial
+        assert {file.name for file in session_path.iterdir()} == {
+            "state.json",
+            "history.jsonl",
+        }
+    finally:
+        store.close()
+
+
 def test_approval_respects_exact_argv_and_session_after_reopen(tmp_path):
-    path = tmp_path / "state.sqlite3"
+    path = tmp_path / "sessions"
     store = Store(path)
     first = store.create_session()["id"]
     second = store.create_session()["id"]
@@ -108,7 +274,7 @@ def test_approval_respects_exact_argv_and_session_after_reopen(tmp_path):
 
 
 def test_approval_cleans_up_after_timeout_and_cancellation(tmp_path):
-    store = Store(tmp_path / "state.sqlite3")
+    store = Store(tmp_path / "sessions")
     session_id = store.create_session()["id"]
 
     async def exercise():
@@ -146,7 +312,7 @@ def test_approval_cleans_up_after_timeout_and_cancellation(tmp_path):
 
 
 def test_guard_markers_and_command_validation(tmp_path):
-    store = Store(tmp_path / "state.sqlite3")
+    store = Store(tmp_path / "sessions")
     guard = Guardrails(store)
     try:
         assert guard.check_input("hello") is None

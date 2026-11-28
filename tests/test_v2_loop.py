@@ -14,7 +14,7 @@ from demoharness.toolbox import ToolRegistry
 
 @pytest.fixture
 def runtime(tmp_path):
-    store = Store(tmp_path / "sessions.db")
+    store = Store(tmp_path / "sessions")
     session_id = store.create_session()["id"]
     guardrails = Guardrails(store)
     registry = ToolRegistry()
