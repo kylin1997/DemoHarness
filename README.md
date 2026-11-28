@@ -35,7 +35,9 @@ uv run demoharness serve
 
 ## 会话、工作区与模型
 
-会话和记忆保存在 `~/.demoharness-v2/harness.sqlite3`，默认工作目录为同级的 `workspace/`。可用 `--state-dir` 和 `--workspace` 分开不同的练习，也可用 `--port` 调整端口。`uv run demoharness serve --help` 列出所有启动选项。 [会话与回放](docs/guide.md#chapter-04)
+每个会话保存在 `~/.demoharness-v2/sessions/<会话 ID>/`。消息、事件和记忆可直接用文本工具查看 `history.jsonl`，会话配置和模型窗口保存在 `state.json`。升级前先停止旧版服务。首次启动时，若状态目录下还没有 `sessions/`，应用会自动导入原有的 `harness.sqlite3`，并在原处保留它作为备份。 [会话与回放](docs/guide.md#chapter-04)
+
+默认工作目录为 `~/.demoharness-v2/workspace/`。每个状态目录同时只供一个应用进程使用。可用 `--state-dir` 和 `--workspace` 分开不同的练习，也可用 `--port` 调整端口。`uv run demoharness serve --help` 列出所有启动选项。
 
 真实模型走 OpenAI 兼容接口。可配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `MODEL`，或在配置文件里设置多个档案。stdio MCP 服务也从配置文件加载。 [模型档案和 MCP 示例](docs/guide.md#chapter-10)
 

@@ -43,7 +43,25 @@ uv run demoharness serve
 
 ## 04 · 时间线与 Session
 
-`POST /api/chat` 流式返回事件。聊天区用文本增量更新，观测区显示模型调用、工具调用、守卫、审批和回填等公开事件。SQLite 保存会话、原始消息、历史窗口和执行记录。默认库路径为 `~/.demoharness-v2/harness.sqlite3`。 [HTTP/SSE](../src/demoharness/application.py) · [SQLite](../src/demoharness/state.py)
+`POST /api/chat` 流式返回事件。聊天区用文本增量更新，观测区显示模型调用、工具调用、守卫、审批和回填等公开事件。重开会话时，页面从 `GET /api/sessions/{session_id}` 读取消息和回放事件。 [HTTP/SSE 与会话接口](../src/demoharness/application.py)
+
+用默认配置运行服务，在会话里发一条消息。先用下面的命令查到对应标题的 `id`，它由 32 个十六进制字符组成。
+
+```sh
+curl -sS http://127.0.0.1:8765/api/sessions
+```
+
+把 `这里填会话ID` 换成刚查到的值，再查看两个文件。使用 `--state-dir` 时，把 `$HOME/.demoharness-v2` 换成实际状态目录。
+
+```sh
+session_dir="$HOME/.demoharness-v2/sessions/这里填会话ID"
+cat "$session_dir/history.jsonl"
+cat "$session_dir/state.json"
+```
+
+`history.jsonl` 的每行都有类型 `kind`、Unix 时间戳 `at` 和内容 `value`。找一行 `kind` 为 `message` 的记录，与聊天里的原始消息对照。再找一行 `event`，把其中 `value.type` 与右栏时序对照。使用记忆工具后还会有 `memory` 记录。`state.json` 记录会话信息、选项、模型窗口和信任的命令。重启服务后，可以打开同一个会话核对回放。 [Store](../src/demoharness/state.py)
+
+从 SQLite 版升级时先停止旧版服务，让最后的写入完成。新服务在 `sessions/` 尚未创建时自动导入同一状态目录下的 `harness.sqlite3`，并在原处保留旧库作为备份。导入保留每种记录原有的顺序，日志外层的 `at` 取旧会话的最后更新时间。 [迁移实现](../src/demoharness/migration.py)
 
 <a id="chapter-05"></a>
 
@@ -67,7 +85,7 @@ ReAct 直接进入模型、工具和观察的循环。计划模式先请求结�
 
 ## 08 · 历史压缩
 
-历史超过 16 条时，较早记录交给模型整理为一条摘要，保留最近 6 条。遇到工具请求及结果的边界时，整组一起保留。执行中也会保留当前用户请求和它的工具往返。原始对话继续留在 SQLite，模型请求使用压缩后的窗口。面板显示当前阈值进度，并对照压缩前后的条数和估算 Token。摘要调用本身也会产生模型用量。 [压缩实现](../src/demoharness/harness.py)
+模型窗口超过 16 条时，较早记录交给模型整理为一条摘要，保留至少最近 6 条。遇到工具请求及结果的边界时，整组一起保留。执行中也会保留当前用户请求和它的工具往返。压缩更新 `state.json` 中的 `context_window`，后续模型请求使用这个窗口。原始消息仍可在 `history.jsonl` 和聊天回放中查看，压缩事件也会追加到 `history.jsonl`。面板显示当前阈值进度，并对照压缩前后的条数和估算 Token。摘要调用本身也会产生模型用量。 [压缩实现](../src/demoharness/harness.py) · [查看会话文件](#chapter-04)
 
 <a id="chapter-09"></a>
 
