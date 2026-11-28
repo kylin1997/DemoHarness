@@ -10,7 +10,7 @@ def handle(request):
             return {
                 "protocolVersion": request["params"]["protocolVersion"],
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "demoharness-echo", "version": "1"},
+                "serverInfo": {"name": "tinyharness-echo", "version": "1"},
             }
         case "tools/list":
             return {"tools": [{

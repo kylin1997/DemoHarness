@@ -1,4 +1,4 @@
-"""Assemble DemoHarness and expose the local HTTP and SSE interface."""
+"""Assemble TinyHarness and expose the local HTTP and SSE interface."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .guardrails import Guardrails
-from .harness import DemoHarness
+from .harness import TinyHarness
 from .models import OpenAiChatModel, ScriptedChatModel
 from .skills import Skills
 from .state import DEFAULT_OPTIONS, Store
@@ -29,7 +29,7 @@ def _error(message: str, status: int = 400) -> web.Response:
 @web.middleware
 async def local_boundary(request: web.Request, handler):
     if not LOCAL_HOST.fullmatch(request.host):
-        return _error("DemoHarness 仅接受本机地址。", 403)
+        return _error("TinyHarness 仅接受本机地址。", 403)
     origin = request.headers.get("Origin")
     if origin and origin != f"{request.scheme}://{request.host}":
         return _error("请求来源与当前界面不一致。", 403)
@@ -69,7 +69,7 @@ class Application:
             try:
                 with demo_file.open("x", encoding="utf-8") as notes:
                     notes.write(
-                        "# DemoHarness 练习\n\n一次真实执行比一句完成声明更有说服力。\n"
+                        "# TinyHarness 练习\n\n一次真实执行比一句完成声明更有说服力。\n"
                     )
             except FileExistsError:
                 pass
@@ -109,7 +109,7 @@ class Application:
         self.skills = Skills(skills_dir.expanduser().resolve())
         self.store = Store(self.state_dir / "sessions")
         self.guardrails = Guardrails(self.store)
-        self.harness = DemoHarness(
+        self.harness = TinyHarness(
             self.store,
             self.registry,
             self.guardrails,

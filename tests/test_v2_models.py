@@ -6,8 +6,8 @@ import json
 import httpx
 import pytest
 
-from demoharness.models import ModelError, OpenAiChatModel, ScriptedChatModel
-from demoharness.protocol import ToolCall
+from tinyharness.models import ModelError, OpenAiChatModel, ScriptedChatModel
+from tinyharness.protocol import ToolCall
 
 
 def test_openai_stream_reassembles_interleaved_calls_and_reports_usage():
@@ -243,7 +243,7 @@ def test_scripted_child_searches_readonly_tools_and_reads_actual_result():
         assert delegate.calls[0].name == "subagent"
 
         messages = [
-            {"role": "system", "content": "DEMOHARNESS_CHILD"},
+            {"role": "system", "content": "TINYHARNESS_CHILD"},
             {"role": "user", "content": delegate.calls[0].arguments["task"]},
         ]
         discovery = await model.chat_stream(
@@ -276,12 +276,12 @@ def test_scripted_plan_and_compaction_use_separate_markers():
         model = ScriptedChatModel()
         user = {"role": "user", "content": "请生成一个可执行计划并检查 notes.md"}
         plan = await model.chat_stream(
-            [{"role": "system", "content": "DEMOHARNESS_PLAN"}, user], [], _discard
+            [{"role": "system", "content": "TINYHARNESS_PLAN"}, user], [], _discard
         )
         assert json.loads(plan.text) == {"steps": ["定位 notes.md", "读取并核对内容"]}
         assert plan.calls == ()
         active = await model.chat_stream(
-            [{"role": "system", "content": "DEMOHARNESS_ACTIVE_PLAN"}, user],
+            [{"role": "system", "content": "TINYHARNESS_ACTIVE_PLAN"}, user],
             _schemas("tool_search", "read", "todo"),
             _discard,
         )
@@ -289,7 +289,7 @@ def test_scripted_plan_and_compaction_use_separate_markers():
         assert active.calls[0].arguments["items"][0]["status"] == "in_progress"
         summary = await model.chat_stream(
             [
-                {"role": "system", "content": "DEMOHARNESS_COMPACT"},
+                {"role": "system", "content": "TINYHARNESS_COMPACT"},
                 {"role": "user", "content": json.dumps([user])},
             ],
             [],
@@ -301,7 +301,7 @@ def test_scripted_plan_and_compaction_use_separate_markers():
         ordinary = await model.chat_stream(
             [
                 {"role": "system", "content": "Main agent instructions"},
-                {"role": "system", "content": "DEMOHARNESS_PLAN"},
+                {"role": "system", "content": "TINYHARNESS_PLAN"},
                 {"role": "user", "content": "你好"},
             ],
             _schemas("tool_search", "read", "todo"),

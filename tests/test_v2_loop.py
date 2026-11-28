@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
-from demoharness.guardrails import INPUT_MARKER, OUTPUT_MARKER, Guardrails
-from demoharness.harness import DemoHarness
-from demoharness.protocol import ModelReply, ToolCall
-from demoharness.skills import Skills
-from demoharness.state import Store
-from demoharness.toolbox import ToolRegistry
+from tinyharness.guardrails import INPUT_MARKER, OUTPUT_MARKER, Guardrails
+from tinyharness.harness import TinyHarness
+from tinyharness.protocol import ModelReply, ToolCall
+from tinyharness.skills import Skills
+from tinyharness.state import Store
+from tinyharness.toolbox import ToolRegistry
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def runtime(tmp_path):
     registry = ToolRegistry()
 
     def make(model):
-        return DemoHarness(
+        return TinyHarness(
             store,
             registry,
             guardrails,
@@ -161,7 +161,7 @@ def test_compaction_retains_the_complete_tool_exchange_and_raw_history(runtime):
 
     class Model:
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
-            if "DEMOHARNESS_COMPACT" in messages[0]["content"]:
+            if "TINYHARNESS_COMPACT" in messages[0]["content"]:
                 assert not schemas
                 return ModelReply("Earlier conversation summary.")
             assert messages[-8:-3] == [request, *observations]
@@ -256,7 +256,7 @@ def test_transcript_keeps_run_identity_after_disconnect(runtime):
 
 
 def test_tool_exchange_remains_available_after_model_failure(runtime, tmp_path):
-    from demoharness.protocol import ModelError
+    from tinyharness.protocol import ModelError
 
     make, store, session_id = runtime
     (tmp_path / "notes.md").write_text("remember this observation")

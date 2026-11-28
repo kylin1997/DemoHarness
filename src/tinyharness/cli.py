@@ -1,4 +1,4 @@
-"""Launch the local DemoHarness web interface."""
+"""Launch the local TinyHarness web interface."""
 
 import argparse
 from pathlib import Path
@@ -9,11 +9,11 @@ from .application import Application
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="demoharness", description=__doc__)
+    parser = argparse.ArgumentParser(prog="tinyharness", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="启动本机三栏界面")
     serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--state-dir", type=Path, default=Path.home() / ".demoharness")
+    serve.add_argument("--state-dir", type=Path, default=Path.home() / ".tinyharness")
     serve.add_argument("--workspace", type=Path)
     serve.add_argument("--skills", type=Path, default=Path("skills"))
     serve.add_argument("--config", type=Path)
@@ -31,5 +31,5 @@ def main(argv=None) -> int:
             handler_cancellation=True,
         )
     except (OSError, TypeError, ValueError) as exc:
-        parser.exit(1, f"无法启动 DemoHarness：{exc}\n")
+        parser.exit(1, f"无法启动 TinyHarness：{exc}\n")
     return 0

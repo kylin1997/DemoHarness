@@ -1,6 +1,6 @@
 "use strict";
 
-const sourceRoot = "../../../src/demoharness/";
+const sourceRoot = "../../../src/tinyharness/";
 
 const modules = {
   web: {
@@ -17,9 +17,9 @@ const modules = {
   application: {
     title: "Application", symbol: "class", file: "application.py", type: "entry",
     graph: [339, 66], role: "启动、装配与网络入口",
-    description: "应用入口集中负责配置、组件的生命周期和 HTTP 路由。一次对话的五阶段由 DemoHarness 管理。",
+    description: "应用入口集中负责配置、组件的生命周期和 HTTP 路由。一次对话的五阶段由 TinyHarness 管理。",
     members: [
-      ["__init__(state_dir, workspace, skills_dir, config_path)", "读取配置，打开会话目录的 Store，装配模型、工具目录、护栏和技能，把它们交给 DemoHarness。"],
+      ["__init__(state_dir, workspace, skills_dir, config_path)", "读取配置，打开会话目录的 Store，装配模型、工具目录、护栏和技能，把它们交给 TinyHarness。"],
       ["_lifecycle(app)", "启动时连接 MCP 服务，退出时关闭连接和存储。"],
       ["make_app() / chat(request) / approve(request)", "提供页面与会话接口、对话事件流和独立审批路由。"],
     ],
@@ -27,9 +27,9 @@ const modules = {
   cli: {
     title: "CLI", symbol: "entry point", file: "cli.py", type: "entry",
     graph: [560, 66], role: "命令行启动",
-    description: "安装包后，demoharness serve 从命令行启动本地应用。可通过 python -m demoharness 进入同一个 CLI。",
+    description: "安装包后，tinyharness serve 从命令行启动本地应用。可通过 python -m tinyharness 进入同一个 CLI。",
     members: [
-      ["demoharness serve", "启动本地 Web 应用。"],
+      ["tinyharness serve", "启动本地 Web 应用。"],
       ["__main__.py", "将 Python 模块入口交给 CLI。"],
     ],
     files: [["cli.py", "cli.py"], ["__main__.py", "__main__.py"]],
@@ -44,7 +44,7 @@ const modules = {
     ],
   },
   harness: {
-    title: "DemoHarness", symbol: "class", file: "harness.py", type: "core",
+    title: "TinyHarness", symbol: "class", file: "harness.py", type: "core",
     graph: [339, 188], role: "一次对话的五阶段",
     description: "把输入、上下文、循环、输出和收尾编排成一次可观察的运行，并负责附带 Session 和 Run 信息的事件。",
     members: [
@@ -161,9 +161,9 @@ const chapters = [
 const stations = [
   {
     title: "全景鸟瞰", node: "application", chapters: [1], seconds: 18,
-    description: "从 Web 或命令行进入 Application，再由 DemoHarness 串起模型、工具、护栏和会话。图上的箭头表示依赖或调用方向。",
+    description: "从 Web 或命令行进入 Application，再由 TinyHarness 串起模型、工具、护栏和会话。图上的箭头表示依赖或调用方向。",
     observe: "发送「核对 workspace 里的 notes.md」，在右栏依次找到模型调用、read 和工具结果。",
-    read: "从 Application.chat 跟到 DemoHarness.chat，再找哪个函数把工具结果交回模型。",
+    read: "从 Application.chat 跟到 TinyHarness.chat，再找哪个函数把工具结果交回模型。",
     sources: [["HTTP 入口", "application.py"], ["最小循环", "agent_loop.py"]],
   },
   {
@@ -174,7 +174,7 @@ const stations = [
     sources: [["装配和路由", "application.py"], ["会话记录和快照", "state.py"]],
     lanes: ["cli", "application", "state", "web"],
     messages: [
-      ["cli", "application", "Application(state_dir, …)", "demoharness serve 传入状态目录", "application", "call", [2]],
+      ["cli", "application", "Application(state_dir, …)", "tinyharness serve 传入状态目录", "application", "call", [2]],
       ["application", "state", "Store(…)", "锁定并准备 sessions/，读取已有会话文件", "state", "call", [4]],
       ["state", "application", "返回 Store", "打开 JSONL 记录和 JSON 快照", "state", "return", [4]],
       ["web", "application", "GET /api/sessions", "页面加载会话列表", "application", "call", [4]],
@@ -185,8 +185,8 @@ const stations = [
   {
     title: "一次对话五阶段", node: "harness", chapters: [3, 4], seconds: 34,
     description: "按 input → context → loop → output → finish 跟踪一次对话。输入护栏在模型用量产生前拦截，输出护栏在结果交付前检查。",
-    observe: "发送「DEMOHARNESS_BLOCK_INPUT」，观察右栏的输入拦截、聊天里的说明和本轮零模型用量。",
-    read: "在 DemoHarness.chat 找 check_input 后的提前返回。看看哪个阶段没收到调用。",
+    observe: "发送「TINYHARNESS_BLOCK_INPUT」，观察右栏的输入拦截、聊天里的说明和本轮零模型用量。",
+    read: "在 TinyHarness.chat 找 check_input 后的提前返回。看看哪个阶段没收到调用。",
     sources: [["五阶段编排", "harness.py"], ["输入与输出护栏", "guardrails.py"]],
     lanes: ["web", "application", "harness", "state", "guard", "skills", "loop", "models", "toolbox"],
     messages: [
@@ -306,7 +306,7 @@ const stations = [
       ["harness", "state", "window(session_id)", "从 state.json 读取模型窗口 · 第 04 章", "state"],
       ["state", "harness", "返回窗口消息", "加入新输入，后续轮次还会继续追加工具往返", "harness", "return"],
       ["harness", "harness", "_Turn.compact()", "超过 16 条演示阈值且有成段旧历史时才摘要 · 第 08 章", "harness"],
-      ["harness", "models", "_Turn.complete() → chat_stream()", "DEMOHARNESS_COMPACT 请求早期消息摘要", "models"],
+      ["harness", "models", "_Turn.complete() → chat_stream()", "TINYHARNESS_COMPACT 请求早期消息摘要", "models"],
       ["models", "harness", "返回摘要", "接上最近 6 条 · 工具请求与观察成组", "harness", "return"],
       ["harness", "state", "save_window(session_id, self.window)", "原子替换 state.json，存下压缩窗口", "state", "call", [4, 8]],
       ["harness", "state", "append_event(session_id, event)", "将 compaction 事件追加到 history.jsonl", "state", "call", [4, 8]],
@@ -327,7 +327,7 @@ const stations = [
     observe: "先发「核对 workspace 里的 notes.md」跟踪 read 调用，再发「请用命令打印 hello」体验工具搜索与审批。",
     read: "首轮工具清单里能找到 run_command 吗？对照 tool_search 之后的清单，再找这个变化由哪里返回。",
     sources: [["serve 入口", "cli.py"], ["可见工具集合", "toolbox.py"]],
-    commands: ["uv sync --locked", "uv run demoharness serve"],
+    commands: ["uv sync --locked", "uv run tinyharness serve"],
     url: "http://127.0.0.1:8765",
   },
 ];

@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from demoharness.guardrails import (
+from tinyharness.guardrails import (
     INPUT_LIMIT,
     OUTPUT_MARKER,
     Guardrails,
     validate_command_argv,
 )
-from demoharness.skills import Skills
-from demoharness.state import Store
+from tinyharness.skills import Skills
+from tinyharness.state import Store
 
 
 def test_store_survives_reopen(tmp_path):
@@ -82,7 +82,7 @@ def test_history_append_updates_recency_without_replacing_snapshot(
     path = tmp_path / "sessions"
     store = Store(path)
     now = 1.0
-    monkeypatch.setattr("demoharness.state.time.time", lambda: now)
+    monkeypatch.setattr("tinyharness.state.time.time", lambda: now)
     first = store.create_session()["id"]
     now = 2.0
     second = store.create_session()
@@ -319,8 +319,8 @@ def test_guard_markers_and_command_validation(tmp_path):
         assert guard.check_input("a" * INPUT_LIMIT) is None
         assert guard.check_input("a" * (INPUT_LIMIT + 1))
         assert guard.check_input("　")
-        assert guard.check_input("x demoharness_block_input y")
-        assert guard.check_tool("write", {"content": ["demoharness_block_tool"]})
+        assert guard.check_input("x tinyharness_block_input y")
+        assert guard.check_tool("write", {"content": ["tinyharness_block_tool"]})
         assert guard.check_output(f"start {OUTPUT_MARKER.lower()} end")
         assert guard.output_holdback == len(OUTPUT_MARKER) - 1
         assert validate_command_argv(["printf", "hello", ""]) is None

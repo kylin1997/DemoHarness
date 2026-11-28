@@ -5,10 +5,10 @@ import sys
 
 import pytest
 
-from demoharness import toolbox
-from demoharness.mcp import McpError, StdioMcpClient
-from demoharness.protocol import FIXED_TOOLS, ToolContext
-from demoharness.toolbox import ToolError, ToolRegistry
+from tinyharness import toolbox
+from tinyharness.mcp import McpError, StdioMcpClient
+from tinyharness.protocol import FIXED_TOOLS, ToolContext
+from tinyharness.toolbox import ToolError, ToolRegistry
 
 
 def context(workspace, *, child=False):

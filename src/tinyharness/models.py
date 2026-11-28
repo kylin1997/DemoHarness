@@ -268,14 +268,14 @@ class _ScriptedTurn:
     def reply(self) -> tuple[str, tuple[ToolCall, ...]]:
         request = self.request.casefold()
         phase = self.system_headers[0] if self.system_headers else ""
-        if phase == "DEMOHARNESS_COMPACT":
+        if phase == "TINYHARNESS_COMPACT":
             return self.compact(), ()
-        if phase == "DEMOHARNESS_PLAN":
+        if phase == "TINYHARNESS_PLAN":
             steps = (
                 _NOTES_PLAN if "notes.md" in request else ("明确请求", "完成并核对结果")
             )
             return json.dumps({"steps": steps}, ensure_ascii=False), ()
-        if phase == "DEMOHARNESS_CHILD":
+        if phase == "TINYHARNESS_CHILD":
             return self.inspect_notes()
         if request == "请用 mcp 回显 hello":
             return self.use_deferred("mcp__demo__echo", {"text": "hello"}, "MCP 回显")
@@ -301,7 +301,7 @@ class _ScriptedTurn:
             )
         if "notes.md" in request:
             return self.inspect_notes(
-                planned="DEMOHARNESS_ACTIVE_PLAN" in self.system_headers
+                planned="TINYHARNESS_ACTIVE_PLAN" in self.system_headers
             )
         if "工具" in request or "tool" in request:
             return (

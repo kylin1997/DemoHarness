@@ -74,7 +74,7 @@ class StdioMcpClient:
                 {
                     "protocolVersion": _PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "DemoHarness", "version": "2"},
+                    "clientInfo": {"name": "TinyHarness", "version": "2"},
                 },
             )
             version = result.get("protocolVersion")

@@ -1,5 +1,5 @@
 [project]
-name = "demoharness"
+name = "tinyharness"
 version = "0.2.0"
 description = "An observable, minimal teaching harness for tool-using agents."
 readme = "README.md"
@@ -17,7 +17,7 @@ dev = [
 ]
 
 [project.scripts]
-demoharness = "demoharness.cli:main"
+tinyharness = "tinyharness.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -27,4 +27,4 @@ build-backend = "hatchling.build"
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/demoharness"]
+packages = ["src/tinyharness"]

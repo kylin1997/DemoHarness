@@ -28,7 +28,7 @@ let redraw = 0;
 
 function treeFile(id, file, label) {
   const icon = file.endsWith(".py") ? "py" : file.endsWith(".js") ? "js" : "↳";
-  return `<li><button type="button" class="tree-file" data-node="${id}" data-file="${file}" title="src/demoharness/${file}">
+  return `<li><button type="button" class="tree-file" data-node="${id}" data-file="${file}" title="src/tinyharness/${file}">
     <span class="file-icon" aria-hidden="true">${icon}</span>${label}
   </button></li>`;
 }
@@ -47,7 +47,7 @@ function renderTree() {
   }).join("");
   const entry = treeFile("cli", "__main__.py", "__main__.py");
   const web = treeFolder("web", modules.web.files.map(([label, file]) => treeFile("web", file, label)).join(""));
-  byId("tree").innerHTML = `<ul class="tree-list tree-root">${treeFolder("src", treeFolder("demoharness", entry + files + web))}</ul>`;
+  byId("tree").innerHTML = `<ul class="tree-list tree-root">${treeFolder("src", treeFolder("tinyharness", entry + files + web))}</ul>`;
 }
 
 function graphEdge(from, to, label, viaX) {

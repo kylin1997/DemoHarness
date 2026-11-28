@@ -120,7 +120,7 @@ def _replace_file(parent: int, name: str, data: bytes) -> None:
         mode = _regular_mode(os.stat(name, dir_fd=parent, follow_symlinks=False))
     except FileNotFoundError:
         mode = 0o644
-    temporary = f".demoharness-write-{secrets.token_hex(16)}"
+    temporary = f".tinyharness-write-{secrets.token_hex(16)}"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
     try:
         with os.fdopen(fd, "wb") as stream:

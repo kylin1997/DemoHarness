@@ -194,11 +194,11 @@ function hydrate(record, messages, events) {
 }
 
 function saveSelected(id) {
-  try { localStorage.setItem('demoharness.selectedSession', id); } catch { /* storage may be disabled */ }
+  try { localStorage.setItem('tinyharness.selectedSession', id); } catch { /* storage may be disabled */ }
 }
 
 function readSelected() {
-  try { return localStorage.getItem('demoharness.selectedSession'); } catch { return null; }
+  try { return localStorage.getItem('tinyharness.selectedSession'); } catch { return null; }
 }
 
 async function loadSession(record) {
