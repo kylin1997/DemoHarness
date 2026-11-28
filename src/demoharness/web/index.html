@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>DemoHarness · Agent 教学工作台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body data-view="chat">
+  <header class="masthead">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <strong>DemoHarness</strong>
+      <span class="brand-caption">Agent 教学工作台</span>
+    </div>
+    <div id="app-status" class="app-status" role="status"><span class="status-dot"></span><span>连接中</span></div>
+  </header>
+  <nav class="view-nav" aria-label="工作区面板">
+    <button type="button" data-view="sessions" aria-pressed="false">会话</button>
+    <button type="button" data-view="chat" aria-pressed="true">对话</button>
+    <button type="button" data-view="inspector" aria-pressed="false">运行观测</button>
+  </nav>
+  <main class="workspace">
+    <aside class="sessions-pane" aria-labelledby="sessions-heading">
+      <div class="pane-heading sessions-heading">
+        <h1 id="sessions-heading">会话 <span id="session-count" class="count"></span></h1>
+        <button id="new-session" class="icon-button" type="button" title="新建会话" aria-label="新建会话">＋</button>
+      </div>
+      <div id="session-list" class="session-list"></div>
+      <div id="session-error" class="session-error" hidden></div>
+    </aside>
+
+    <section class="chat-pane" aria-labelledby="chat-heading">
+      <header class="pane-heading chat-heading">
+        <div class="chat-title"><span class="eyebrow">对话</span><h2 id="chat-heading">新会话</h2></div>
+        <span id="chat-mode" class="mode-chip">ReAct</span>
+      </header>
+      <div id="messages" class="messages" aria-label="对话消息">
+        <div id="message-content" class="message-content"></div>
+      </div>
+      <div class="compose-area">
+        <div id="composer-status" class="composer-status" role="status" hidden></div>
+        <form id="composer" class="composer">
+          <label class="visually-hidden" for="prompt">发给 Agent 的消息</label>
+          <textarea id="prompt" rows="2" placeholder="给 Agent 一项任务…" required></textarea>
+          <div class="composer-bar">
+            <div class="settings">
+              <label class="setting"><span>模型</span><select id="profile" aria-label="模型配置"></select></label>
+              <label class="setting"><span>推理</span><select id="reasoning" aria-label="推理强度"></select></label>
+              <label class="setting"><span>模式</span><select id="mode" aria-label="执行模式"></select></label>
+            </div>
+            <button id="send" class="send-button" type="submit" aria-label="发送消息" title="发送消息"><span class="send-label">发送</span><span class="send-arrow" aria-hidden="true">↑</span></button>
+          </div>
+        </form>
+        <div class="keyboard-hint"><kbd>Enter</kbd> 发送 <span aria-hidden="true">·</span> <kbd>Shift + Enter</kbd> 换行</div>
+      </div>
+    </section>
+
+    <aside class="inspector-pane" aria-labelledby="inspector-heading">
+      <header class="pane-heading inspector-heading">
+        <h2 id="inspector-heading">运行观测</h2>
+        <select id="run-select" class="small-select" aria-label="选择运行"></select>
+      </header>
+      <div class="inspector-content">
+        <section class="inspector-card trace-card" aria-label="运行轨迹">
+          <div class="trace-tabs" role="tablist" aria-label="轨迹视图">
+            <button id="tab-sequence" type="button" role="tab" aria-selected="true" aria-controls="trace-panel" data-tab="sequence">时序</button>
+            <button id="tab-plan" type="button" role="tab" aria-selected="false" aria-controls="trace-panel" data-tab="plan" tabindex="-1">计划<span id="plan-count" class="tab-count"></span></button>
+            <button id="tab-child" type="button" role="tab" aria-selected="false" aria-controls="trace-panel" data-tab="child" tabindex="-1">子 Agent<span id="child-count" class="tab-count"></span></button>
+          </div>
+          <div id="trace-panel" class="trace-panel" role="tabpanel" aria-labelledby="tab-sequence"></div>
+        </section>
+        <section id="context-panel" class="inspector-card" aria-label="上下文用量"></section>
+        <section id="compaction-panel" class="inspector-card" aria-label="上下文压缩记录" tabindex="-1"></section>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

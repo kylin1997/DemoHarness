@@ -1,165 +1,51 @@
 # DemoHarness 架构总览
 
-DemoHarness 是一个通用任务型 Agent 教学产品。学习者可以在 CLI 交代任务、输入事件、查看动态工作流并验收交付。Python API 使用同一个运行时，也提供接入工具和验收器的接口。
+学习者从浏览器发起一条消息，跟着同一轮的输出观察模型、环境和 Harness 的职责。最小 `agent_loop()` 让模型在可用工具范围内选择动作，把工具结果变成下一次调用的输入。没有工具请求时，模型返回的文本可以作为本轮结果。轮数上限为循环收敛提供保险丝。这个结构参考了 Anthropic 对简单组合、环境真实反馈、人工检查点和停止条件的说明。 [Anthropic · Building effective agents](https://www.anthropic.com/research/building-effective-agents) · [最小循环](../src/demoharness/agent_loop.py)
 
-## 产品行为
+## 装配和边界
 
-- **接受工作。** Agent 可以从消息或事件中判断是否创建 Task、为已有 Task 补充信息，或直接回复、澄清、忽略。明确的目标也可以通过 `Agent.submit()` 直接提交。
-- **自主推进。** 一个 Task 有一份可修订的步骤清单，代码中叫 `Plan`。清单记录 Agent 当前怎样分解工作。Agent 自己决定下一步动作，并根据工具结果和新输入调整后续计划。目标和验收条件由明确指令更新。工具和写入权限由宿主事先配置。
-- **提交交付。** 宿主运行已经配置的验收器。检查失败且有额度时，Agent 收到反馈继续修正。需要人工判断的结果会保存为待验收交付，使用者可以通过或退回修改。
-
-SQLite 保存 Task、Session 和记忆。一个 Agent 可以同时推进多件事，同一个 Task 同时最多由一个 Worker 推进。文件产物留在 Task 工作副本里。
-
-## 项目架构
+`Application` 做三件事。读取本机配置并打开会话存储，装配模型、工具、护栏和技能，最后提供浏览器界面及 HTTP/SSE 端点。HTTP 入口按会话限制同时运行的对话，审批另走 POST，因此等待审批时流仍然可以接收事件。 [Application](../src/demoharness/application.py)
 
 ```mermaid
-flowchart TB
-	Project["本地 Git 仓库"]
-
-	subgraph Host["DemoHarness · Python 进程"]
-		CLI["CLI"]
-		API["Agent API"]
-		Observer["运行时定时检查 Git HEAD"]
-		Coordinator["协调器"]
-		Runtime["AgentRuntime"]
-		Worker["Worker"]
-		Loop["run_loop()"]
-		Tools["工具与权限检查"]
-		Checks["自动验收与人工验收"]
-		Model["模型调用接口"]
-		Store["TaskStore"]
-		Memory["MemoryStore"]
-	end
-
-	subgraph State["状态目录"]
-		DB[("agent.sqlite3")]
-		Workspace["Task 工作副本"]
-	end
-
-	CLI --> API
-	Project -->|当前提交| Observer
-	Observer -->|提交变更摘要| Coordinator
-	API -->|消息或事件| Coordinator
-	API -->|"submit() 入队后"| Runtime
-	Coordinator -->|Task 入队后| Runtime
-	Runtime -->|调度| Worker
-	Worker -->|推进 Task| Loop
-	Coordinator -->|请求路由决定| Model
-	Loop -->|请求操作或完成提议| Model
-	Loop -->|读写执行记录| Store
-	Loop -->|执行获准动作| Tools
-	Loop -->|提交结果| Checks
-	Checks -->|保存验收与交付| Store
-	Memory -->|补充相关记忆| Loop
-	Store --> DB
-	Memory --> DB
-	Tools -->|读写并核对文件| Workspace
+flowchart LR
+    Page["浏览器三栏"] -->|"POST /api/chat"| HTTP["Application"]
+    HTTP --> Harness["DemoHarness.chat()"]
+    Harness --> Guard["输入、工具、输出护栏"]
+    Harness --> Window["历史窗口、Skills 与记忆"]
+    Harness --> Loop["agent_loop()"]
+    Loop -->|"messages + 已加载工具 Schema"| Model["ChatModel"]
+    Model -->|"工具请求或文本增量"| Loop
+    Loop -->|"调用策略"| Tools["ToolRegistry"]
+    Tools -->|"真实结果或错误观察"| Loop
+    HTTP -->|"启动时打开"| Store["会话目录 · JSONL 与 JSON"]
+    Harness -->|"追加记录、读写快照"| Store
+    Harness -->|"SSE 事件"| Page
+    Page -->|"POST /api/approve"| Guard
 ```
 
-普通消息和 `Agent.receive_event()` 进入同一个协调入口。已知 Task ID 时，可用 `Agent.send(..., task_id=...)` 直接补充要求。关联到执行中的 Task 后，Worker 会在动作边界重新检查最新输入，Agent 据此决定是否修订步骤清单。 [消息如何找到 Task](super-agent.md#消息如何找到-task)
-
-Git 提交是 Super Agent 主动发现工作的入口。运行时默认每隔 5 秒读取本地仓库当前指向的提交（`HEAD`）。发现提交变化后，运行时记录变更证据，协调器再决定创建 Task、关联已有 Task 或忽略。 [Git 提交如何变成工作](super-agent.md#git-提交如何变成工作)
-
-Worker 管理一次 Run，主 Task 和只读子 Agent 共用 `run_loop()`。模型调用接口由 `AgentDefinition.complete` 提供，可以接可控模型或 OpenAI 兼容适配器。协调日志、Task 执行记录和长期记忆共用 `agent.sqlite3`。工作副本以源项目的 Git 提交或目录快照为基线。协调、Worker 与临时委派的分工参考了 DeepSeek Super Agent 的领域模型。 [执行循环](../src/demoharness/core/loop.py) · [DeepSeek 领域模型](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/docs/001-domain.md)
-
-## 先认清几个抽象
-
-| 概念 | 职责和归属 |
+| 模块 | 负责什么 |
 | --- | --- |
-| Agent 定义 | `AgentDefinition` 保存稳定 ID、所属项目、身份提示、模型入口和工具权限。CLI 可以读取 Agent 目录下的 `SOUL.md` 和 `AGENTS.md` 作为提示。 |
-| Agent 实例 | `runtime.agent(id)` 返回的操作入口，能接收消息、查 Task、停止和恢复工作。同一宿主内的 Task、工作目录、协调记录和长期记忆按 Agent ID 隔离。 |
-| Agent 运行时 | `AgentRuntime` 打开状态目录，管理 SQLite、协调器、观察器和 Worker 的生命周期。关闭后停止推进，重开时恢复可继续的工作。 |
-| Worker | 运行时为一个 Task 调度的进程内异步任务。它认领 Task、开启 Run，准备或复用工作副本，再推进执行循环。 |
-| Task | 一件可独立推进的工作，拥有目标、验收条件、授权、预算、工作副本及 Plan。 |
-| Session | 完成一件事留下的历史，包括用户输入、模型轮次、工具记录、Plan 修订和交付。每个 Task 对应一个 Session，共用 ID。 |
-| Plan | Task 的动态工作流，记录 Agent 分解出来的步骤。每步有稳定 ID、状态和证据引用，修订保留版本和原因。实际动作由 Agent 选择。 |
-| Run | Task 的一次执行尝试，记录起止时间、配置版本和结束原因。停止后继续同一个 Task 时会开始新的 Run。 |
-| Context | 一次模型请求的输入，来自当前目标、验收、Plan、Session 片段和相关记忆。每轮重新组装。 |
-| 子 Agent | 主 Task 临时委派的只读调查者。有独立上下文，按需读取父 Session，完成后交回结论与证据。 |
-| 长期记忆 | Agent 跨 Task 使用的偏好、项目事实、约束和经验，附带来源。项目知识可以按项目限定召回。 |
+| [DemoHarness](../src/demoharness/harness.py) | 串起输入、上下文、执行循环、输出、收尾五个阶段。父 Agent 与 SubAgent 都能复用最小循环。 |
+| [工具与协议](../src/demoharness/toolbox.py) | 每个工具用自己的 Schema 和处理策略。搜索发现工具后，下一轮才获得相应 Schema。 |
+| [Guardrails](../src/demoharness/guardrails.py) | 拦截输入、验证工具请求、等待用户审批，并检查对外文本。审批的归属按 Session 和审批 ID 核对。 |
+| [Store](../src/demoharness/state.py) | 通过原有接口保存会话记录和状态快照，为对话、模型窗口和回放提供读取入口。 |
+| [Skills](../src/demoharness/skills.py) | 启动时读取技能目录，向模型展示简短索引，并在命中输入时加载对应全文。 |
+| [模型适配](../src/demoharness/models.py) | 离线模型和 OpenAI 兼容模型遵守同一个流式调用接口。 |
+| [MCP](../src/demoharness/mcp.py) | 连接本机配置的 stdio 服务，发现并调用远端工具。 |
 
-## 主流程时序
+工具按需注入以 Anthropic Tool Search 的设计为参考。固定的 `tool_search`、`read`、`todo` 初始可用，其他工具的 Schema 随发现结果加入。发现结果只在当前用户轮次生效。父 Agent 的记忆按会话持久化，子 Agent 从独立上下文开始，回传可公开的结果及工具证据。 [Anthropic · Tool search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool) · [工具与模式](guide.md#chapter-05)
 
-在教学 CLI 中，以「整理上线简报」开始一件工作。Agent 拆解步骤并提交草稿。收到日期变更事件后，它找到原 Task，修订步骤并更新交付。 [CLI 演练](../examples/README.md#操作教学-cli)
+## 会话持久化
 
-```mermaid
----
-config:
-  sequence:
-    width: 125
-    actorMargin: 25
-    diagramMarginX: 20
-    mirrorActors: false
----
-sequenceDiagram
-	actor Caller as 调用方
-	participant Runtime as Agent API<br/>与协调器
-	participant Store as TaskStore
-	participant Worker
-	participant Model as 模型
-	participant Tools as 宿主工具与验收
+每个会话使用 `~/.demoharness/sessions/<会话 ID>/` 下的两个文件。正常写入时，`history.jsonl` 每行追加一条消息（`message`）、回放事件（`event`）或记忆（`memory`）。每行有 `kind`、Unix 时间戳 `at` 和内容 `value`。状态快照 `state.json` 记录 `id`、`title`、`created_at`、`updated_at`、`options`、`context_window` 和 `trusted_commands`。历史压缩用 `save_window()` 更新快照里的模型窗口，原始消息仍可从 JSONL 读取。 [Store](../src/demoharness/state.py)
 
-	Caller->>Runtime: 用户消息或结构化事件
-	Runtime->>Store: 保存待协调输入
-	Runtime->>Model: 请求判断输入归属
-	Model-->>Runtime: 创建 Task 或关联已有 Task
-	Runtime->>Store: 保存归属和任务输入
-	Runtime-)Worker: 调度 Worker
-	Worker->>Store: 认领 Task，开启 Run
-	Worker->>Tools: 准备或复用工作副本
-	Worker->>Worker: 进入 run_loop()
+Store 启动时准备 `sessions/`，创建会话时生成两个文件。它以原子替换更新快照，重开时会丢弃日志末尾未写完的一行。目录锁保证每个状态目录只有一个应用进程写入。指定 `--state-dir` 时，会话文件写入指定目录下的 `sessions/`。 [会话与回放](guide.md#chapter-04)
 
-	loop Task 运行中
-		alt 需要模型响应
-			Worker->>Store: 读取 Task 和 Session<br/>扣除模型预算
-			Worker->>Model: ModelRequest<br/>含 Context 和工具定义
-			Model-->>Worker: 工具调用或完成提议
-			Worker->>Store: 保存动作或完成提议
-		else 有待执行的工具动作
-			Worker->>Tools: 核对参数、权限和写入范围
-			Worker->>Store: 获准后扣除工具预算<br/>记录动作开始
-			Worker->>Tools: 执行工具或更新 Plan
-			Tools-->>Worker: 返回工具结果
-			Worker->>Store: 保存工具结果
-		else 有待验收的完成提议
-			Worker->>Store: 扣除验收预算<br/>记录验收开始
-			Worker->>Tools: 执行配置的验收器<br/>检查文件变化范围
-			Tools-->>Worker: 返回验收结果
-			alt 验收通过
-				Worker->>Store: 结束 Run，保存 Delivery
-			else 验收失败且可重试
-				Worker->>Store: 记录失败原因<br/>供下一轮读取
-			else 需要人工判断
-				Worker->>Store: 结束 Run<br/>保存待验收交付
-			end
-		end
-	end
+## 生产化边界
 
-	Runtime-->>Caller: 显示 Task 和交付物
-	opt 人工验收
-		Caller->>Runtime: 通过或退回
-		Runtime->>Store: 保存人工验收决定
-	end
-```
-
-每次循环先检查未结算的工具动作，再检查已有的完成提议，最后才组装 Context 并请求模型。执行中收到补充要求时，循环会在动作边界检查最新输入。验收失败且还有次数时，循环会带着失败原因继续修正。文件验收示例可以逐条对照 Session 和源码。 [任务执行](task-execution.md) · [Session 与恢复](session-and-recovery.md)
-
-## 从现象追到源码
-
-| 想理解的问题 | 起点 | 接着读 |
-| --- | --- | --- |
-| 命令如何变成调用 | [CLI](../src/demoharness/cli.py) · [运行时和 Agent API](../src/demoharness/runtime.py) | [任务执行](task-execution.md) |
-| 模型、工具和验收怎样循环 | [执行循环](../src/demoharness/core/loop.py) · [文件工具](../src/demoharness/tools/files.py) | [任务执行](task-execution.md) |
-| 状态记在哪里，重启怎样继续 | [TaskStore](../src/demoharness/core/storage.py) · [Session 投影](../src/demoharness/core/session.py) | [Session 与恢复](session-and-recovery.md) |
-| 怎样处理多件事、委派并积累经验 | [消息路由](../src/demoharness/coordination.py) · [委派](../src/demoharness/tools/delegation.py) · [记忆](../src/demoharness/memory.py) · [Git 观察](../src/demoharness/discovery.py) | [Super Agent](super-agent.md) |
-
-## 生产化还要考虑什么
-
-当前实现适用于单机教学。投入生产前，还需要根据数据敏感度、运行规模和工具风险完善这些方向。
-
-1. **权限与隔离**。明确用户和服务身份。为高风险工具设置审批、执行沙箱和网络访问策略。
-2. **可靠执行**。定义重试与幂等边界，验证数据库备份、迁移和故障恢复。
-3. **并发与容量**。按用户或租户隔离任务，设计队列调度、限流及资源配额。
-4. **数据与隐私**。集中管理凭据，规定 Session 和记忆的访问、保留与删除策略。
-5. **可观测性与运营**。关联 Task、Run 和工具日志，建立指标、追踪、告警和审计。
-6. **模型质量与成本**。用实际任务持续评测，设置调用预算、超时和降级策略。
+1. 为用户、会话、工具执行容器设置身份和资源隔离。
+2. 为命令、网页获取和 MCP 建立系统级沙箱及网络访问策略。
+3. 为历史、记忆与审批制定访问、保留、删除和备份规则。
+4. 为调用、批准、错误和 Token 成本加入关联日志、追踪和告警。
+5. 评测真实模型的工具选择、重试、输出守卫和上下文压缩质量。
+6. 为升级、并发、取消和恢复制定可测试的服务级目标。
