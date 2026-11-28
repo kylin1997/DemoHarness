@@ -1,4 +1,8 @@
-"""Build the context, run the agent, and store the session and teaching events."""
+"""对话编排层：装配上下文，驱动 Agent 循环，并保存会话与教学事件。
+
+输入检查、上下文准备、执行循环、输出检查和收尾构成一次用户轮次。
+计划、技能、记忆、历史压缩与只读子 Agent 都在这一层接入最小循环。
+"""
 
 from __future__ import annotations
 
@@ -50,7 +54,7 @@ COMPACT_PROMPT = (
 
 
 class TurnError(RuntimeError):
-    """A run could not deliver an answer."""
+    """本次运行无法交付回复，例如计划模型返回的步骤格式无效。"""
 
 
 async def _ignore_delta(text: str) -> None:
@@ -58,7 +62,10 @@ async def _ignore_delta(text: str) -> None:
 
 
 class _OutputStream:
-    """Keep enough of each chunk to catch a blocked marker spanning two chunks."""
+    """暂存流式文本的末尾，以检查跨分块出现的输出拦截标记。
+
+    检查通过的前缀通过 delta 事件发送，剩余尾部在最终输出通过检查后发送。
+    """
 
     def __init__(self, guards: Guardrails, emit: Emit):
         self.guards = guards
@@ -88,6 +95,12 @@ class _OutputStream:
 
 
 class TinyHarness:
+    """对话运行入口，协调存储、工具目录、护栏、技能和模型适配器。
+
+    chat() 为每条用户消息创建独立的 _Turn，按阶段推进并记录可回放的结果。
+    HTTP 请求处理和同一会话的并发限制由 Application 负责。
+    """
+
     def __init__(
         self,
         store: Store,
@@ -160,7 +173,11 @@ class TinyHarness:
 
 
 class _Turn:
-    """The parent and each child share events, while keeping their contexts apart."""
+    """保存一次父 Agent 或子 Agent 执行的上下文、计划、工具发现和输出状态。
+
+    父子执行共用会话 ID、运行 ID 和事件发送通道，通过 actor 区分事件来源。
+    每个执行使用独立的消息窗口与工具可见集合，子 Agent 仅能使用只读工具。
+    """
 
     def __init__(
         self,

@@ -1,4 +1,4 @@
-"""Launch the local TinyHarness web interface."""
+"""解析命令行中的目录和监听配置，装配应用并启动本机 TinyHarness Web 服务。"""
 
 import argparse
 from pathlib import Path

@@ -1,3 +1,3 @@
-"""A minimal observable teaching harness for tool-using agents."""
+"""TinyHarness 包：提供可观察的教学运行环境，演示模型调用工具的完整流程。"""
 
 __version__ = "0.2.0"

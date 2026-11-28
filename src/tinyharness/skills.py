@@ -1,4 +1,7 @@
-"""List skill headers and load instructions only for matching requests."""
+"""技能加载与匹配：读取 SKILL.md，默认提供简短索引，输入命中触发词时提供正文。
+
+支持带 frontmatter 的技能文件，也可从普通 Markdown 标题和首段提取名称与描述。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,8 @@ _INLINE_ITEM = re.compile(r"""\s*("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^,]+)""")
 
 @dataclass(frozen=True)
 class _Skill:
+    """解析后的单项技能，保存名称、描述、规范化触发词和待注入的正文。"""
+
     name: str
     description: str
     triggers: tuple[str, ...]
@@ -19,6 +24,11 @@ class _Skill:
 
 
 class Skills:
+    """启动时读取指定文件或目录中的技能，按用户输入匹配需要注入上下文的正文。
+
+    index() 仅返回截短的名称和描述；match_input() 不区分大小写地匹配触发词。
+    """
+
     def __init__(self, path: Path):
         path = Path(path)
         files = [path] if path.is_file() else sorted(path.rglob("SKILL.md"))

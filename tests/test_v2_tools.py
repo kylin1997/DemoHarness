@@ -1,3 +1,5 @@
+"""验证工具发现、参数校验、文件与网络访问边界，以及 MCP 通信和取消行为。"""
+
 import asyncio
 import json
 import re

@@ -1,4 +1,7 @@
-"""A small stdio MCP client for locally configured servers."""
+"""本机 stdio MCP 客户端：启动服务进程，发现工具并转发工具调用。
+
+使用逐行 JSON-RPC 通信，对请求时长、消息大小和工具列表分页数设置上限。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import signal
 
 
 class McpError(RuntimeError):
-    """An MCP request could not be completed."""
+    """MCP 启动、协议协商或请求失败，由工具层转换为模型可读取的错误观察。"""
 
 
 _MAX_FRAME_BYTES = 256 * 1024
@@ -36,7 +39,10 @@ async def stop_process(process: asyncio.subprocess.Process) -> None:
 
 
 class StdioMcpClient:
-    """Exchange bounded, newline-delimited JSON-RPC messages over stdio."""
+    """管理一个 MCP 子进程，并通过标准输入输出交换有大小限制的 JSON-RPC 消息。
+
+    请求使用递增 ID，通过异步锁串行收发；收发时遇到 I/O 或消息格式错误会关闭进程。
+    """
 
     def __init__(
         self,

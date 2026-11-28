@@ -1,4 +1,8 @@
-"""Model adapters for the harness's shared chat protocol."""
+"""模型适配层：将 OpenAI 兼容接口和离线演示统一为 ChatModel 调用方式。
+
+真实模型响应经 JSON 或 SSE 解析为 ModelReply，文本增量通过回调交给运行层。
+离线模型按固定场景选择工具，并依据实际工具观察返回可复现的回复。
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,10 @@ OnDelta = Callable[[str], Awaitable[None]]
 
 
 class OpenAiChatModel:
-    """Translate Chat Completions responses into text deltas and complete tool calls."""
+    """调用 OpenAI 兼容的 Chat Completions 接口，输出文本增量和完整工具请求。
+
+    支持 SSE 与普通 JSON 响应，将连接失败及无效响应转换为 ModelError。
+    """
 
     def __init__(
         self,
@@ -117,6 +124,8 @@ async def _sse_data(response: httpx.Response) -> AsyncIterator[str]:
 
 @dataclass
 class _ToolParts:
+    """累积单个工具调用的 ID、名称和参数片段，结束时解析为 ToolCall。"""
+
     id: str = ""
     name: str = ""
     arguments: list[str] = field(default_factory=list)
@@ -139,6 +148,11 @@ class _ToolParts:
 
 @dataclass
 class _ReplyParts:
+    """累积回复文本、按索引交错到达的工具片段，以及提供商返回的 Token 用量。
+
+    finish() 检查消息和工具调用是否完整，再组装统一的 ModelReply。
+    """
+
     text: list[str] = field(default_factory=list)
     tools: dict[int, _ToolParts] = field(default_factory=dict)
     input_tokens: int | None = None
@@ -201,7 +215,10 @@ _NOTES_PLAN = ("定位 notes.md", "读取并核对内容")
 
 
 class ScriptedChatModel:
-    """Reproducible offline fixtures with estimated token counts and actual tool observations."""
+    """无需网络的演示模型，按固定场景请求工具并读取实际观察结果。
+
+    文本按固定长度分块发送，Token 用量依据输入和输出的字节数估算。
+    """
 
     async def chat_stream(
         self,
@@ -229,6 +246,8 @@ class ScriptedChatModel:
 
 @dataclass
 class _ScriptedTurn:
+    """提取当前演示轮次的请求、系统标记、可见工具与观察结果，并决定下一步回复。"""
+
     request: str
     system_headers: list[str]
     available: set[str]

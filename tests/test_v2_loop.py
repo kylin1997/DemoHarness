@@ -1,4 +1,4 @@
-"""Exercise the v2 runtime through its session and chat entry point."""
+"""通过会话和对话入口验证运行阶段、流式护栏、工具发现、压缩及错误恢复。"""
 
 import asyncio
 
@@ -43,6 +43,8 @@ def test_streaming_guard_with_cross_chunk_marker(runtime):
         prefix = "Safe public text while the model is still running. "
 
         class Model:
+            """分两次输出拦截标记，模拟提供商暂停，验证跨分块的流式护栏。"""
+
             async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
                 await on_delta(prefix + OUTPUT_MARKER[:12])
                 provider_paused.set()
@@ -97,6 +99,8 @@ def test_tool_search_exposes_schemas_on_the_next_round_only(runtime, tmp_path):
     shown = []
 
     class Model:
+        """先搜索再调用 glob，验证新发现工具的 Schema 从下一轮开始可用。"""
+
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
             shown.append({schema["function"]["name"] for schema in schemas})
             if len(shown) == 1:
@@ -160,6 +164,8 @@ def test_compaction_retains_the_complete_tool_exchange_and_raw_history(runtime):
     events = []
 
     class Model:
+        """返回历史摘要并检查后续上下文，验证压缩保留完整的工具往返。"""
+
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
             if "TINYHARNESS_COMPACT" in messages[0]["content"]:
                 assert not schemas
@@ -189,6 +195,8 @@ def test_malformed_command_never_requests_approval(runtime):
     events = []
 
     class Model:
+        """发现命令工具后提交含多余字段的参数，验证无效请求不会进入审批。"""
+
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
             if not any(message["role"] == "tool" for message in messages):
                 return ModelReply(
@@ -226,6 +234,8 @@ def test_transcript_keeps_run_identity_after_disconnect(runtime):
     make, store, session_id = runtime
 
     class Model:
+        """返回固定回复，供断线后继续对话并核对运行 ID 的测试使用。"""
+
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
             return ModelReply("第二条已完成。")
 
@@ -263,6 +273,8 @@ def test_tool_exchange_remains_available_after_model_failure(runtime, tmp_path):
     events = []
 
     class Model:
+        """读取文件后模拟模型失败，再检查下一次对话能否使用此前的工具观察。"""
+
         async def chat_stream(self, messages, schemas, on_delta, *, reasoning):
             if messages[-1]["content"] == "read a file":
                 return ModelReply(

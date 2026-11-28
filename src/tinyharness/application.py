@@ -1,4 +1,7 @@
-"""Assemble TinyHarness and expose the local HTTP and SSE interface."""
+"""应用装配与 HTTP 入口：加载本机配置，连接运行组件并提供界面及 SSE 事件流。
+
+本模块负责请求来源检查、会话 API 和组件生命周期；对话编排交给 TinyHarness。
+"""
 
 from __future__ import annotations
 
@@ -51,6 +54,12 @@ async def _body(request: web.Request) -> dict:
 
 
 class Application:
+    """持有本机应用组件，并把 HTTP 请求转换为会话操作、对话运行和审批决定。
+
+    启动时连接配置的 MCP 服务，关闭时释放工具客户端与会话存储。
+    同一会话只允许一个对话请求运行，审批通过独立端点提交。
+    """
+
     def __init__(
         self,
         state_dir: Path,

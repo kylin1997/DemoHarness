@@ -1,4 +1,7 @@
-"""Deterministic teaching checks and session-scoped command approval."""
+"""教学护栏：检查输入、工具参数和输出，并管理会话内的命令审批。
+
+拦截标记用于演示确定性检查；命令信任按完整 argv 签名保存到会话存储。
+"""
 
 from __future__ import annotations
 
@@ -35,6 +38,12 @@ def validate_command_argv(argv: object) -> str | None:
 
 
 class Guardrails:
+    """集中执行内容检查和命令审批，返回拒绝原因或用 None 表示通过。
+
+    待审批请求以会话 ID 和审批 ID 共同索引；超时或取消后移除等待项。
+    用户选择信任时，仅保存当前会话中该组完整命令参数的批准记录。
+    """
+
     # A streaming caller can withhold this many trailing characters per delta.
     output_holdback = len(OUTPUT_MARKER) - 1
 

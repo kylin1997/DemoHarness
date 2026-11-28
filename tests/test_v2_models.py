@@ -1,4 +1,4 @@
-"""Exercise the public model protocol with fixtures that never use the network."""
+"""使用无网络测试数据验证模型协议、流式工具调用组装及离线演示行为。"""
 
 import asyncio
 import json
@@ -18,6 +18,8 @@ def test_openai_stream_reassembles_interleaved_calls_and_reports_usage():
             deltas.append(text)
 
         class EventStream(httpx.AsyncByteStream):
+            """模拟包含交错工具片段和用量信息的 SSE 字节流，验证响应解析。"""
+
             async def __aiter__(self):
                 chunks = [
                     {

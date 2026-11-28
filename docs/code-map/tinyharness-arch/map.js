@@ -1,3 +1,7 @@
+/**
+ * 教学代码地图的交互逻辑，使用 map-data.js 中的模块、关系和导览数据。
+ * 联动源码树、关系图与讲解卡，控制站点导览、时序展示、播放和缩放。
+ */
 "use strict";
 
 const byId = (id) => document.getElementById(id);

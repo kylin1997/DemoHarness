@@ -1,3 +1,7 @@
+/**
+ * 教学代码地图的静态数据，定义源码入口、模块职责、调用关系和章节链接。
+ * 数据由 map.js 读取，用于绘制模块图、时序图和十站导览。
+ */
 "use strict";
 
 const sourceRoot = "../../../src/tinyharness/";

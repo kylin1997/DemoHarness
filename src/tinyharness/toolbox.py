@@ -1,4 +1,7 @@
-"""Tool strategies exposed to the model through per-turn discovery."""
+"""工具实现与目录：按用户轮次发现工具，校验参数并执行内置或 MCP 工具。
+
+文件工具限制在工作区内，命令和网页工具设置执行边界；会话审批由运行层调用护栏。
+"""
 
 from __future__ import annotations
 
@@ -32,7 +35,7 @@ from .protocol import ToolContext, ToolSpec
 
 
 class ToolError(ValueError):
-    """A safe failure message that the loop can give back to the model."""
+    """可回填给模型的工具失败说明，使循环能基于错误观察继续判断。"""
 
 
 _MAX_FILE_BYTES = 64 * 1024
@@ -169,7 +172,7 @@ async def _edit(context: ToolContext, args: dict) -> str:
 
 
 class _ScanLimit(Exception):
-    pass
+    """文件遍历达到条目上限时中止扫描，防止搜索无界消耗资源。"""
 
 
 def _walk_files(root: Path) -> Iterator[tuple[str, ...]]:
@@ -363,6 +366,8 @@ def _check_url(url: URL) -> None:
 
 
 class _PublicResolver(ThreadedResolver):
+    """检查 DNS 解析结果，仅将全部通过公网地址检查的记录交给 HTTP 连接器。"""
+
     async def resolve(
         self, host: str, port: int = 0, family: int = socket.AF_UNSPEC
     ) -> list[ResolveResult]:
@@ -627,7 +632,11 @@ def _mcp_client(settings: dict) -> StdioMcpClient:
 
 
 class ToolRegistry:
-    """Describe built-in and configured tools and validate calls before their effects."""
+    """维护内置与 MCP 工具定义，提供 Schema 查询、按需发现、参数校验及执行入口。
+
+    工具发现结果写入当前 ToolContext 的 revealed 集合，不在不同用户轮次间共享。
+    MCP 客户端随目录连接和关闭，工具结果统一限制长度并转换常见执行错误。
+    """
 
     def __init__(self):
         specs = (

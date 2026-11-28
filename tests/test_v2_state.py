@@ -1,3 +1,5 @@
+"""验证会话持久化、日志恢复、命令审批和技能匹配的正常路径及失败边界。"""
+
 from __future__ import annotations
 
 import asyncio

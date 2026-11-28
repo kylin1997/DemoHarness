@@ -1,4 +1,8 @@
-"""The shared model → tool → observation loop."""
+"""最小 Agent 循环：请求模型、执行工具，再将观察结果回填到消息列表。
+
+每轮固定本轮可见的工具集合；新发现的工具到下一轮才可用。
+上下文装配、权限检查和事件记录由调用方通过 think 与 act 回调提供。
+"""
 
 from collections.abc import Awaitable, Callable
 
@@ -6,7 +10,7 @@ from .protocol import ModelReply, ToolCall
 
 
 class LoopLimit(RuntimeError):
-    """The agent ran out of model rounds before reaching an answer."""
+    """模型用尽允许的调用轮次，仍未返回不含工具调用的最终回复。"""
 
 
 async def agent_loop(

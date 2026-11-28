@@ -1,4 +1,4 @@
-"""A local stdio MCP server for the guide's discovery exercise."""
+"""教学用 stdio MCP 服务，供指南演示协议初始化、工具发现及 echo 回显调用。"""
 
 import json
 import sys

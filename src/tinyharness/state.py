@@ -1,4 +1,7 @@
-"""Persist the chat transcript, model context, and session-scoped decisions."""
+"""会话持久化：以 JSONL 追加消息、事件和记忆，以 JSON 快照保存配置及模型窗口。
+
+目录锁限制单进程写入，原子替换保护状态快照，重开存储时清理日志末尾的未完成行。
+"""
 
 from __future__ import annotations
 
@@ -114,6 +117,12 @@ def _history(path: Path, *, recover_tail: bool = False) -> Iterator[dict]:
 
 
 class Store:
+    """管理会话目录，分别提供原始历史、模型上下文窗口和命令信任记录的读写入口。
+
+    每个会话使用 history.jsonl 与 state.json；压缩窗口不删除原始消息。
+    实例持有存储目录的写入锁，使用结束后调用 close() 释放。
+    """
+
     def __init__(self, root: Path):
         self._root = Path(root).resolve()
         self._root.parent.mkdir(parents=True, exist_ok=True)

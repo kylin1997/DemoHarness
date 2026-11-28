@@ -1,3 +1,7 @@
+/**
+ * TinyHarness 浏览器界面：管理会话与对话选项，发送聊天和审批请求。
+ * 消费 SSE 事件，将消息、工具时序、计划、子 Agent 和上下文用量绘制到三栏视图。
+ */
 'use strict';
 
 const byId = (id) => document.getElementById(id);
