@@ -13,9 +13,7 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="启动本机三栏界面")
     serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument(
-        "--state-dir", type=Path, default=Path.home() / ".demoharness-v2"
-    )
+    serve.add_argument("--state-dir", type=Path, default=Path.home() / ".demoharness")
     serve.add_argument("--workspace", type=Path)
     serve.add_argument("--skills", type=Path, default=Path("skills"))
     serve.add_argument("--config", type=Path)

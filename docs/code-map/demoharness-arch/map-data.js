@@ -175,7 +175,7 @@ const stations = [
     lanes: ["cli", "application", "state", "web"],
     messages: [
       ["cli", "application", "Application(state_dir, …)", "demoharness serve 传入状态目录", "application", "call", [2]],
-      ["application", "state", "Store(…)", "锁定状态目录。sessions/ 尚未创建时可导入旧 SQLite", "state", "call", [4]],
+      ["application", "state", "Store(…)", "锁定并准备 sessions/，读取已有会话文件", "state", "call", [4]],
       ["state", "application", "返回 Store", "打开 JSONL 记录和 JSON 快照", "state", "return", [4]],
       ["web", "application", "GET /api/sessions", "页面加载会话列表", "application", "call", [4]],
       ["application", "state", "list_sessions()", "读取已保存的会话", "state", "call", [4]],

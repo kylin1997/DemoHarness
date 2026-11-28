@@ -107,9 +107,7 @@ class Application:
 
         self.registry = ToolRegistry()
         self.skills = Skills(skills_dir.expanduser().resolve())
-        self.store = Store(
-            self.state_dir / "sessions", legacy_path=self.state_dir / "harness.sqlite3"
-        )
+        self.store = Store(self.state_dir / "sessions")
         self.guardrails = Guardrails(self.store)
         self.harness = DemoHarness(
             self.store,

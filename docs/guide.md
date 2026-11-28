@@ -51,17 +51,15 @@ uv run demoharness serve
 curl -sS http://127.0.0.1:8765/api/sessions
 ```
 
-把 `这里填会话ID` 换成刚查到的值，再查看两个文件。使用 `--state-dir` 时，把 `$HOME/.demoharness-v2` 换成实际状态目录。
+把 `这里填会话ID` 换成刚查到的值，再查看两个文件。使用 `--state-dir` 时，把 `$HOME/.demoharness` 换成实际状态目录。
 
 ```sh
-session_dir="$HOME/.demoharness-v2/sessions/这里填会话ID"
+session_dir="$HOME/.demoharness/sessions/这里填会话ID"
 cat "$session_dir/history.jsonl"
 cat "$session_dir/state.json"
 ```
 
 `history.jsonl` 的每行都有类型 `kind`、Unix 时间戳 `at` 和内容 `value`。找一行 `kind` 为 `message` 的记录，与聊天里的原始消息对照。再找一行 `event`，把其中 `value.type` 与右栏时序对照。使用记忆工具后还会有 `memory` 记录。`state.json` 记录会话信息、选项、模型窗口和信任的命令。重启服务后，可以打开同一个会话核对回放。 [Store](../src/demoharness/state.py)
-
-从 SQLite 版升级时先停止旧版服务，让最后的写入完成。新服务在 `sessions/` 尚未创建时自动导入同一状态目录下的 `harness.sqlite3`，并在原处保留旧库作为备份。导入保留每种记录原有的顺序，日志外层的 `at` 取旧会话的最后更新时间。 [迁移实现](../src/demoharness/migration.py)
 
 <a id="chapter-05"></a>
 

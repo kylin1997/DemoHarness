@@ -37,9 +37,9 @@ flowchart LR
 
 ## 会话持久化
 
-每个会话使用 `~/.demoharness-v2/sessions/<会话 ID>/` 下的两个文件。正常写入时，`history.jsonl` 每行追加一条消息（`message`）、回放事件（`event`）或记忆（`memory`）。每行有 `kind`、Unix 时间戳 `at` 和内容 `value`。状态快照 `state.json` 记录 `id`、`title`、`created_at`、`updated_at`、`options`、`context_window` 和 `trusted_commands`。历史压缩用 `save_window()` 更新快照里的模型窗口，原始消息仍可从 JSONL 读取。 [Store](../src/demoharness/state.py)
+每个会话使用 `~/.demoharness/sessions/<会话 ID>/` 下的两个文件。正常写入时，`history.jsonl` 每行追加一条消息（`message`）、回放事件（`event`）或记忆（`memory`）。每行有 `kind`、Unix 时间戳 `at` 和内容 `value`。状态快照 `state.json` 记录 `id`、`title`、`created_at`、`updated_at`、`options`、`context_window` 和 `trusted_commands`。历史压缩用 `save_window()` 更新快照里的模型窗口，原始消息仍可从 JSONL 读取。 [Store](../src/demoharness/state.py)
 
-Store 以原子替换更新快照，重开时会丢弃末尾未写完的一行。目录锁保证每个状态目录只有一个应用进程写入。升级前先停止旧版服务，让最后的 SQLite 写入完成。启动时仅在 `sessions/` 尚未创建时自动导入旧的 `harness.sqlite3`，旧库留在原处作为备份。日常运行直接读写会话文件。指定 `--state-dir` 时，这些路径都以指定目录为准。 [会话与回放](guide.md#chapter-04)
+Store 启动时准备 `sessions/`，创建会话时生成两个文件。它以原子替换更新快照，重开时会丢弃日志末尾未写完的一行。目录锁保证每个状态目录只有一个应用进程写入。指定 `--state-dir` 时，会话文件写入指定目录下的 `sessions/`。 [会话与回放](guide.md#chapter-04)
 
 ## 生产化边界
 

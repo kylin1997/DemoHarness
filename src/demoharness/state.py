@@ -114,7 +114,7 @@ def _history(path: Path, *, recover_tail: bool = False) -> Iterator[dict]:
 
 
 class Store:
-    def __init__(self, root: Path, *, legacy_path: Path | None = None):
+    def __init__(self, root: Path):
         self._root = Path(root).resolve()
         self._root.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self._root.parent / f".{self._root.name}.lock"
@@ -127,14 +127,6 @@ class Store:
                 raise RuntimeError(
                     f"Session store is already open: {self._root}"
                 ) from exc
-            if (
-                not self._root.exists()
-                and legacy_path is not None
-                and legacy_path.is_file()
-            ):
-                from .migration import migrate_sqlite
-
-                migrate_sqlite(legacy_path, self._root)
             if not self._root.exists():
                 self._root.mkdir()
                 _sync_directory(self._root.parent)
