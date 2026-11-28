@@ -1014,8 +1014,8 @@ function historyProgress(events) {
   const progress = document.createElement('progress');
   progress.max = threshold;
   progress.value = Math.min(count, threshold);
-  progress.setAttribute('aria-label', '历史压缩阈值进度');
-  field.append(title, progress, node('p', 'token-usage', `超过 ${threshold} 条触发压缩 · 保留最近 ${recent} 条`));
+  progress.setAttribute('aria-label', '历史压缩演示阈值进度');
+  field.append(title, progress, node('p', 'token-usage', `演示阈值 · 历史窗口超过 ${threshold} 条时尝试压缩 · 保留至少最近 ${recent} 条`));
   return field;
 }
 
@@ -1046,7 +1046,7 @@ function renderCompaction(events, run) {
   chart.append(compactionRow('压缩前', item.before, item.before_tokens, max), compactionRow('压缩后', item.after, item.after_tokens, max, 'after'));
   const detail = [];
   if (Number.isFinite(item.kept)) detail.push(`保留最近 ${item.kept} 条`);
-  if (Number.isFinite(item.threshold)) detail.push(`阈值 ${item.threshold} 条`);
+  if (Number.isFinite(item.threshold)) detail.push(`演示阈值 ${item.threshold} 条`);
   preserveFocus(panel, () => {
     panel.replaceChildren(heading);
     if (progress) panel.append(progress);
